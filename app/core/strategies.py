@@ -55,6 +55,8 @@ class AttackStrategy:
         random.shuffle(heroes)
         heroes.append("loglauncher")
         
+        deployed_heroes = []
+
         for hero in heroes:
             bx, by = self.vision.find_template(frame, f"{hero}.png", threshold=0.7)
             if not bx:
@@ -67,6 +69,14 @@ class AttackStrategy:
             self.input.click(bx, by, pause=0.2, rand=False)
             # Deploy
             self.input.click(*deploy_point, pause=0.2)
+            
+            if hero != "loglauncher":
+                deployed_heroes.append((bx, by))
+
+        # Activate abilities
+        for (hx, hy) in deployed_heroes:
+            self.input.click(hx, hy, pause=0.2)
+            time.sleep(random.uniform(0.1, 0.2))
 
     def _get_hero_deploy_point(self):
         # Pick a random line between corners
@@ -136,6 +146,12 @@ class TroopSpamStrategy(AttackStrategy):
             self.input.mouse_up(*self._expand_loc(*start_pos))
 
         # Deploy rest
-        self.deploy_heroes(frame)
-        self.deploy_spells(frame)
-
+        # Refresh frame before deploying spells/heroes to ensure we have latest state
+        frame = self.input.window_service.screenshot()
+        if frame is not None:
+            self.deploy_spells(frame)
+            
+            # Refresh again before heroes just in case
+            frame = self.input.window_service.screenshot()
+            if frame is not None:
+                self.deploy_heroes(frame)
