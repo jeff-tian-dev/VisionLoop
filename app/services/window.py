@@ -106,7 +106,7 @@ class WindowService:
             height = rect.bottom - rect.top
             
             if width <= 0 or height <= 0:
-                logger.warning("Window has invalid dimensions.")
+                # logger.warning("Window has invalid dimensions.") # Suppress spam
                 return None
 
             # Get DC

@@ -1,2 +1,0 @@
-python -m PyInstaller --noconfirm --onefile --windowed --name "ClashAutoLoot" --add-data "templates;templates" --hidden-import "PIL._tkinter_finder" --hidden-import "app" --collect-all "app" app/main.py
-pause

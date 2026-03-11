@@ -58,6 +58,52 @@ class VisionService:
             return None, None
 
     @staticmethod
+    def find_template_with_confidence(
+        screen_img: np.ndarray,
+        template_name: str,
+        threshold: float = 0.0,
+        region: Optional[Tuple[int, int, int, int]] = None
+    ) -> Tuple[Optional[int], Optional[int], float]:
+        """
+        Finds a template and returns (center_x, center_y, confidence).
+        Confidence is 0.0-1.0 from cv2.matchTemplate TM_CCOEFF_NORMED.
+        Returns (None, None, confidence) if not found above threshold.
+        """
+        try:
+            template_path = str(get_resource_path(f"templates/{template_name}"))
+            template = cv2.imread(template_path)
+            if template is None:
+                logger.error(f"Template not found: {template_path}")
+                return None, None, 0.0
+
+            if region:
+                x, y, w, h = region
+                h_screen, w_screen = screen_img.shape[:2]
+                if x + w > w_screen or y + h > h_screen:
+                    return None, None, 0.0
+                search_img = screen_img[y:y+h, x:x+w]
+                offset_x, offset_y = x, y
+            else:
+                search_img = screen_img
+                offset_x, offset_y = 0, 0
+
+            result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+            if max_val < threshold:
+                return None, None, float(max_val)
+
+            t_h, t_w = template.shape[:2]
+            center_x = offset_x + max_loc[0] + t_w // 2
+            center_y = offset_y + max_loc[1] + t_h // 2
+
+            return center_x, center_y, float(max_val)
+
+        except Exception as e:
+            logger.error(f"Error in find_template_with_confidence: {e}")
+            return None, None, 0.0
+
+    @staticmethod
     def find_all_templates(
         screen_img: np.ndarray,
         template_name: str,

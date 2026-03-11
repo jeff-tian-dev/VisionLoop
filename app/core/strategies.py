@@ -11,19 +11,24 @@ logger = setup_logger("Strategies")
 
 class AttackStrategy:
     """Base class for attack strategies."""
-    
-    def __init__(self, input_service: InputService, vision_service: VisionService, config: Config):
+
+    def __init__(self, input_service: InputService, vision_service: VisionService, config: Config, stop_event=None):
         self.input = input_service
         self.vision = vision_service
         self.config = config
+        self.stop_event = stop_event
         self.data = config.data
         self.CORNER_ORDER = ["left", "top", "right", "bottom"]
 
-    def execute(self, frame):
+    def execute(self, frame, stop_event=None):
         raise NotImplementedError
 
+    def _check_stop(self):
+        if self.stop_event and self.stop_event.is_set():
+            raise InterruptedError("Bot stopped by user")
+
     def _expand_loc(self, x: int, y: int) -> Tuple[int, int]:
-        return x + random.randint(-15, 15), y + random.randint(-15, 15)
+        return x + random.randint(-10, 10), y + random.randint(-10, 10)
 
     def _corner_helper(self, current: str, direction: int) -> str:
         idx = self.CORNER_ORDER.index(current)
@@ -53,10 +58,17 @@ class AttackStrategy:
     def deploy_heroes(self, frame):
         heroes = ["queen", "warden", "RC", "king", "prince"]
         random.shuffle(heroes)
-        heroes.append("loglauncher")
         
         deployed_heroes = []
 
+        # Deploy Log Launcher
+        lx, ly = self.vision.find_template(frame, "loglauncher.png", threshold=0.7)
+        if lx:
+            deploy_point = self._get_hero_deploy_point()
+            self.input.click(lx, ly, pause=0.2, rand=False)
+            self.input.click(*deploy_point, pause=0.2)
+
+        # Loop 1: Deploy Heroes
         for hero in heroes:
             bx, by = self.vision.find_template(frame, f"{hero}.png", threshold=0.7)
             if not bx:
@@ -70,13 +82,15 @@ class AttackStrategy:
             # Deploy
             self.input.click(*deploy_point, pause=0.2)
             
-            if hero != "loglauncher":
-                deployed_heroes.append((bx, by))
+            deployed_heroes.append((bx, by))
 
-        # Activate abilities
+        # Loop 2: Activate Abilities
         for (hx, hy) in deployed_heroes:
             self.input.click(hx, hy, pause=0.2)
-            time.sleep(random.uniform(0.1, 0.2))
+            if self.stop_event:
+                self.stop_event.wait(random.uniform(0.1, 0.2))
+            else:
+                time.sleep(random.uniform(0.1, 0.2))
 
     def _get_hero_deploy_point(self):
         # Pick a random line between corners
@@ -113,45 +127,79 @@ class AttackStrategy:
 
 
 class TroopSpamStrategy(AttackStrategy):
-    def __init__(self, input_service, vision_service, config, troop_name: str, duration: int):
-        super().__init__(input_service, vision_service, config)
+    def __init__(self, input_service, vision_service, config, stop_event, troop_name: str, duration: int):
+        super().__init__(input_service, vision_service, config, stop_event)
         self.troop_name = troop_name
         self.duration = duration
 
-    def execute(self, frame):
+    def execute(self, frame, stop_event=None):
+        ev = stop_event or self.stop_event
         logger.info(f"Executing {self.troop_name} strategy")
-        time.sleep(random.randint(1, 2))
-        
-        # Select Troop
+
+        delay = random.randint(1, 2)
+        if ev and ev.wait(delay):
+            return
+
         tx, ty = self.vision.find_template(frame, f"{self.troop_name}.png")
         if not tx:
             logger.warning(f"Troop {self.troop_name} not found!")
             return
 
         self.input.click(tx, ty)
-        time.sleep(0.2)
-        
-        starting_corner = random.choice(["right", "left"])
-        start_pos = self.data[starting_corner]
-        
-        # Start dragging
-        sx, sy = self._expand_loc(*start_pos)
-        self.input.mouse_down(sx, sy)
-        time.sleep(0.7)
-        
-        try:
-            self._troop_spam_helper(starting_corner, random.randint(1, 2), 0, self.duration)
-        finally:
-            # Ensure mouse up
-            self.input.mouse_up(*self._expand_loc(*start_pos))
+        if ev and ev.wait(0.2):
+            return
 
-        # Deploy rest
-        # Refresh frame before deploying spells/heroes to ensure we have latest state
+        # Path definition
+        corners = ["top", "right", "bottom", "left"]
+        # Avoid starting at bottom (index 2) to prevent UI interference
+        start_idx = random.choice([0, 1, 3])
+        direction = random.choice([1, -1]) # 1 = CW, -1 = CCW
+        
+        # Create ordered list of corners: [Start, 2, 3, 4, Start]
+        ordered_corners = []
+        for i in range(5): # 5 points to close the loop
+            idx = (start_idx + (i * direction)) % 4
+            ordered_corners.append(corners[idx])
+
+        # Start Deployment (The "Anchor")
+        start_corner = ordered_corners[0]
+        # We need to track current position for human_move
+        curr_x, curr_y = self._expand_loc(*self.data[start_corner])
+        
+        self.input.mouse_down(curr_x, curr_y)
+        if ev and ev.wait(0.65):
+            self.input.mouse_up(curr_x, curr_y)
+            return
+
+        try:
+            total_duration = self.duration
+            segment_duration = total_duration / 4
+
+            for i in range(len(ordered_corners) - 1):
+                if ev and ev.is_set():
+                    break
+
+                next_c = ordered_corners[i+1]
+                target_x, target_y = self._expand_loc(*self.data[next_c])
+                duration = random.uniform(segment_duration * 0.9, segment_duration * 1.1)
+
+                self.input.human_move(curr_x, curr_y, target_x, target_y, duration=duration)
+
+                curr_x, curr_y = target_x, target_y
+
+        finally:
+            self.input.mouse_up(curr_x, curr_y)
+
+        if ev and ev.is_set():
+            return
+
         frame = self.input.window_service.screenshot()
         if frame is not None:
             self.deploy_spells(frame)
-            
-            # Refresh again before heroes just in case
+
+            if ev and ev.is_set():
+                return
+
             frame = self.input.window_service.screenshot()
             if frame is not None:
                 self.deploy_heroes(frame)

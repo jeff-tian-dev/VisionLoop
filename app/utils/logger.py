@@ -1,8 +1,9 @@
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-def setup_logger(name: str = "AutoLoot", log_file: str = "autoloot.log", level: int = logging.INFO) -> logging.Logger:
+def setup_logger(name: str = "AutoLoot", log_file: str = "autoloot.log", level: int = logging.ERROR) -> logging.Logger:
     """Configures and returns a logger instance."""
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -20,9 +21,12 @@ def setup_logger(name: str = "AutoLoot", log_file: str = "autoloot.log", level: 
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    # File Handler
+    # File Handler (Rotating)
     try:
-        file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        # Max size 5MB, keep 3 backups
+        file_handler = RotatingFileHandler(
+            log_file, mode="a", encoding="utf-8", maxBytes=5*1024*1024, backupCount=3
+        )
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     except Exception as e:

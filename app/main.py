@@ -1,5 +1,10 @@
 import sys
+import os
 from multiprocessing import freeze_support
+
+# Ensure project root is on sys.path so "app" package is importable from anywhere
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from app.ui.gui import run_gui
 from app.utils.logger import setup_logger
 
@@ -16,3 +21,6 @@ def main():
 if __name__ == "__main__":
     freeze_support()
     main()
+
+# python -m PyInstaller --noconfirm --onefile --windowed --name "ClashAutoLoot" --add-data "templates;templates" --paths "." --hidden-import "app" --hidden-import "app.ui" --hidden-import "app.core" --hidden-import "app.services" --hidden-import "app.utils" "app/main.py"
+

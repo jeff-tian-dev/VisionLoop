@@ -1,6 +1,7 @@
 import ctypes
 import time
 import random
+import math
 from app.services.window import WindowService, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, MK_LBUTTON, WM_MOUSEWHEEL, WHEEL_DELTA
 from app.utils.logger import setup_logger
 
@@ -8,9 +9,10 @@ logger = setup_logger("InputService")
 
 class InputService:
     """Handles mouse and keyboard injection."""
-    
-    def __init__(self, window_service: WindowService):
+
+    def __init__(self, window_service: WindowService, stop_event=None):
         self.window_service = window_service
+        self.stop_event = stop_event
         self.user32 = ctypes.windll.user32
 
     def _make_lparam(self, x: int, y: int) -> int:
@@ -52,36 +54,45 @@ class InputService:
         if not hwnd: return
         self.user32.SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON, self._make_lparam(x, y))
 
-    def human_move(self, x1: int, y1: int, x2: int, y2: int, duration: int = 400):
-        """Simulates human-like mouse movement using a Bezier curve-like approach."""
+    def human_move(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.5):
+        """Simulates human-like mouse movement using a Bezier curve and easing."""
         hwnd = self.window_service.hwnd
         if not hwnd: return
 
         # Randomize control point for curve
-        cx = (x1 + x2) / 2 + random.randint(-30, 30)
-        cy = (y1 + y2) / 2 + random.randint(-30, 30)
-        
-        steps = duration
-        # Randomize timing curve
-        flip = random.randint(int(steps * 0.3), int(steps * 0.7))
-        method = random.randint(0, 1)
-        tim = 0.01 if method == 1 else 0.001
+        mx = (x1 + x2) / 2
+        my = (y1 + y2) / 2
+        dist = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
+        offset = dist * random.uniform(0.05, 0.2)
+        cx = mx + random.uniform(-offset, offset)
+        cy = my + random.uniform(-offset, offset)
 
-        for i in range(steps + 1):
-            t = i / steps
-            # Quadratic Bezier
-            x = (1 - t)**2 * x1 + 2 * (1 - t) * t * cx + t**2 * x2
-            y = (1 - t)**2 * y1 + 2 * (1 - t) * t * cy + t**2 * y2
-            
+        start_time = time.perf_counter()
+
+        while True:
+            if self.stop_event and self.stop_event.is_set():
+                break
+
+            current_time = time.perf_counter()
+            elapsed = current_time - start_time
+
+            if elapsed >= duration:
+                break
+
+            t = elapsed / duration
+            ease = -(math.cos(math.pi * t) - 1) / 2
+            u = 1 - ease
+            x = (u ** 2) * x1 + 2 * u * ease * cx + (ease ** 2) * x2
+            y = (u ** 2) * y1 + 2 * u * ease * cy + (ease ** 2) * y2
+
             self.move(int(x), int(y))
-            
-            time.sleep(max(0, tim))
-            
-            # Accelerate/Decelerate logic
-            if (i < flip and method) or (i > flip and not method):
-                tim /= 1.005
+
+            if self.stop_event:
+                self.stop_event.wait(0.005)
             else:
-                tim /= 0.995
+                time.sleep(0.005)
+
+        self.move(x2, y2)
 
     def scroll(self, x: int, y: int, amount: int):
         hwnd = self.window_service.hwnd
