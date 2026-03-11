@@ -31,7 +31,7 @@ class Bot:
         self.running = True
         self.stop_event.clear()
 
-        duration = 300 if star_bonus else run_time_minutes * 60  # 5 min for star bonus
+        duration = 900 if star_bonus else run_time_minutes * 60  # 15 min hard cap for star bonus
         logger.info(f"Bot started. Method: {method}, Time: {run_time_minutes}m, Walls: {upgrade_walls}, StarBonus: {star_bonus}")
 
         try:
@@ -173,19 +173,27 @@ class Bot:
         return confidence < EMPTYSTAR_THRESHOLD
 
     def _home_screen_recovery(self):
-        """Ensures we are back at home screen."""
+        """Ensures we are back at home screen. Dismisses any Okay popup before considering home."""
         for _ in range(15):
             self._check_stop()
-            # If we see Attack button, we are home
-            ax, ay = self.vision.find_template(self.window.screenshot(), "attack.png")
-            if ax: return
-            
-            # If we see Okay button, click it
-            ox, oy = self.vision.find_template(self.window.screenshot(), "okay.png")
+            frame = self.window.screenshot()
+            if frame is None:
+                if self.stop_event.wait(1):
+                    return
+                continue
+
+            # Check Okay first - dismiss any popup before we consider ourselves home
+            ox, oy = self.vision.find_template(frame, "okay.png")
             if ox:
                 self.input.click(ox, oy)
                 if self.stop_event.wait(0.3):
                     return
+                continue
+
+            # No popup; if we see Attack button, we are home
+            ax, ay = self.vision.find_template(frame, "attack.png")
+            if ax:
+                return
 
             if self.stop_event.wait(1):
                 return
