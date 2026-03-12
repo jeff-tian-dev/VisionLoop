@@ -22,8 +22,9 @@ class Bot:
         self.vision = VisionService()
         self.running = False
 
-    def start(self, method: int, run_time_minutes: int, upgrade_walls: bool, star_bonus: bool = False):
+    def start(self, method: int, run_time_minutes: int, upgrade_walls: bool, star_bonus: bool = False, status_callback=None):
         """Starts the bot loop."""
+        self._status_callback = status_callback
         # Re-find window each time farming starts (hwnd changes when game is closed/reopened)
         if not self.window.find_window():
             raise RuntimeError("Clash of Clans window not found. Please ensure the game is open.")
@@ -75,7 +76,7 @@ class Bot:
                 self._handle_walls()
 
             # Start Attack
-            self._find_match_and_attack(method_id)
+            troop_failed = self._find_match_and_attack(method_id)
 
             # Return Home (clicks Okay, then Return Home)
             self._return_home()
@@ -83,21 +84,31 @@ class Bot:
             # Recover/Home Check (get to home screen - Attack button visible)
             self._home_screen_recovery()
 
+            # Stop if troop was not found (after completing current cycle)
+            if troop_failed:
+                break
+
+            # Scroll down/out a bit now that we're on home
+            self.input.scroll(1000, 1000, 5)
+            if self.stop_event.wait(random.uniform(0.15, 0.25)):
+                return
+
             # Star Bonus mode: stop when emptystar.png is NOT found on home screen
             # (empty star gone = star bonus claimed)
             if star_bonus and self._is_star_bonus_claimed():
                 logger.info("Star bonus claimed (empty star no longer visible). Stopping.")
                 break
 
-    def _find_match_and_attack(self, method_id: int):
+    def _find_match_and_attack(self, method_id: int) -> bool:
+        """Returns True if troop was not found (bot should stop)."""
         # Click Attack
         ax, ay = self._wait_for_image("attack.png")
-        if not ax: return
+        if not ax: return False
         self.input.click(ax, ay, pause=0.1)
 
         # Click Find Match
         fx, fy = self._wait_for_image("findmatch.png")
-        if not fx: return
+        if not fx: return False
         self.input.click(fx, fy, pause=0.1)
         
         # Click Attack (Confirm?)
@@ -110,23 +121,25 @@ class Bot:
         
         # Execute Strategy
         frame = self.window.screenshot()
-        if frame is None: return
+        if frame is None: return False
 
         strategy = self._get_strategy(method_id)
-        strategy.execute(frame, self.stop_event)
+        result = strategy.execute(frame, self.stop_event)
         
         # Wait for battle end
         self._wait_for_battle_end(is_sneaky=(method_id == 1))
+        return result is False
 
     def _get_strategy(self, method_id: int):
+        cb = getattr(self, "_status_callback", None)
         if method_id == 1:
-            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "sneaky", 15)
+            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "sneaky", 15, status_callback=cb)
         elif method_id == 2:
-            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "superminion", 3.1)
+            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "superminion", 3.1, status_callback=cb)
         elif method_id == 3:
-            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "valkyrie", 5.5)
+            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "valkyrie", 5.5, status_callback=cb)
         else:
-            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "sneaky", 15)
+            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "sneaky", 15, status_callback=cb)
 
     def _wait_for_battle_end(self, is_sneaky: bool):
         if is_sneaky:

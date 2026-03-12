@@ -2,10 +2,19 @@ import customtkinter as ctk
 from tkinter import messagebox
 import threading
 import winsound
+import platform
 from app.core.bot import Bot
 from app.utils.logger import setup_logger
 
 logger = setup_logger("GUI")
+
+if platform.system() == "Windows":
+    try:
+        from app.services.taskbar_thumb import TaskbarThumb
+    except ImportError:
+        TaskbarThumb = None
+else:
+    TaskbarThumb = None
 
 ATTACK_MAP = {"Sneaky Goblins": 1, "Super Minions": 2, "Valkyries": 3}
 
@@ -33,8 +42,12 @@ class AutoLootApp(ctk.CTk):
 
         self.bot = Bot()
         self.bot_thread = None
+        self._taskbar_thumb = None
 
         self._init_ui()
+
+        if TaskbarThumb:
+            self.after(500, self._setup_taskbar_thumb)
 
     def _card(self, parent, **kwargs):
         """Create a card-style frame."""
@@ -198,6 +211,32 @@ class AutoLootApp(ctk.CTk):
         )
         self.status_label.grid(row=0, column=0, sticky="w", padx=PAD, pady=10)
 
+    def _setup_taskbar_thumb(self):
+        """Initialize taskbar thumbnail toolbar (Windows only)."""
+        if not TaskbarThumb or self._taskbar_thumb:
+            return
+        self.update_idletasks()  # Ensure window is realized and title is set
+        try:
+            self._taskbar_thumb = TaskbarThumb(
+                on_start=self._on_taskbar_start,
+                on_stop=self._on_taskbar_stop,
+            )
+            if self._taskbar_thumb.setup(self):
+                self._taskbar_thumb.update_buttons(running=False)
+            else:
+                self._taskbar_thumb = None
+        except Exception as e:
+            logger.warning(f"Taskbar thumb setup failed: {e}", exc_info=True)
+            self._taskbar_thumb = None
+
+    def _on_taskbar_start(self):
+        if not (self.bot_thread and self.bot_thread.is_alive()):
+            self.start_bot()
+
+    def _on_taskbar_stop(self):
+        if self.bot_thread and self.bot_thread.is_alive():
+            self.stop_bot()
+
     def _validate_duration(self, value):
         """Allow only digits, max 3 characters."""
         if value == "":
@@ -245,6 +284,8 @@ class AutoLootApp(ctk.CTk):
             self.btn_start.configure(state="disabled")
             self.btn_stop.configure(state="normal")
             self.status_label.configure(text="Star Bonus...", text_color=TEXT_MUTED)
+            if self._taskbar_thumb:
+                self._taskbar_thumb.update_buttons(running=True)
             self.bot_thread = threading.Thread(
                 target=self._run_star_bonus_thread,
                 args=(method, walls),
@@ -260,6 +301,8 @@ class AutoLootApp(ctk.CTk):
             self.btn_start.configure(state="disabled")
             self.btn_stop.configure(state="normal")
             self.status_label.configure(text="Running...", text_color=TEXT_MUTED)
+            if self._taskbar_thumb:
+                self._taskbar_thumb.update_buttons(running=True)
             self.bot_thread = threading.Thread(
                 target=self._run_bot_thread,
                 args=(method, mins, walls),
@@ -268,16 +311,20 @@ class AutoLootApp(ctk.CTk):
             self.bot_thread.start()
 
     def _run_star_bonus_thread(self, method, walls):
+        def on_status(msg):
+            self.after(0, lambda m=msg: self._update_status(m, warning="not found" in m.lower()))
         try:
-            self.bot.start(method, 5, walls, star_bonus=True)
+            self.bot.start(method, 5, walls, star_bonus=True, status_callback=on_status)
             error_msg = None
         except Exception as e:
             error_msg = str(e)
         self.after(0, lambda: self._on_bot_finished(error_msg))
 
     def _run_bot_thread(self, method, mins, walls):
+        def on_status(msg):
+            self.after(0, lambda m=msg: self._update_status(m, warning="not found" in m.lower()))
         try:
-            self.bot.start(method, mins, walls)
+            self.bot.start(method, mins, walls, status_callback=on_status)
             error_msg = None
         except Exception as e:
             error_msg = str(e)
@@ -287,9 +334,16 @@ class AutoLootApp(ctk.CTk):
         self.bot.stop()
         self.status_label.configure(text="Stopping...", text_color=TEXT_MUTED)
 
+    def _update_status(self, msg: str, warning: bool = False):
+        """Update status bar. Use warning=True for error styling."""
+        color = DANGER if warning else TEXT_MUTED
+        self.status_label.configure(text=msg, text_color=color)
+
     def _on_bot_finished(self, error_msg=None):
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
+        if self._taskbar_thumb:
+            self._taskbar_thumb.update_buttons(running=False)
         if error_msg:
             preview = error_msg[:50] + "..." if len(error_msg) > 50 else error_msg
             self.status_label.configure(text=f"Error: {preview}", text_color="#ef4444")

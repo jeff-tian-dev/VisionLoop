@@ -127,10 +127,11 @@ class AttackStrategy:
 
 
 class TroopSpamStrategy(AttackStrategy):
-    def __init__(self, input_service, vision_service, config, stop_event, troop_name: str, duration: int):
+    def __init__(self, input_service, vision_service, config, stop_event, troop_name: str, duration: int, status_callback=None):
         super().__init__(input_service, vision_service, config, stop_event)
         self.troop_name = troop_name
         self.duration = duration
+        self.status_callback = status_callback
 
     def execute(self, frame, stop_event=None):
         ev = stop_event or self.stop_event
@@ -138,16 +139,19 @@ class TroopSpamStrategy(AttackStrategy):
 
         delay = random.randint(1, 2)
         if ev and ev.wait(delay):
-            return
+            return True
 
         tx, ty = self.vision.find_template(frame, f"{self.troop_name}.png")
         if not tx:
-            logger.warning(f"Troop {self.troop_name} not found!")
-            return
+            msg = f"Troop {self.troop_name} not found!"
+            logger.warning(msg)
+            if self.status_callback:
+                self.status_callback(msg)
+            return False
 
         self.input.click(tx, ty)
         if ev and ev.wait(0.2):
-            return
+            return True
 
         # Path definition
         corners = ["top", "right", "bottom", "left"]
@@ -169,7 +173,7 @@ class TroopSpamStrategy(AttackStrategy):
         self.input.mouse_down(curr_x, curr_y)
         if ev and ev.wait(0.65):
             self.input.mouse_up(curr_x, curr_y)
-            return
+            return True
 
         try:
             total_duration = self.duration
@@ -191,15 +195,16 @@ class TroopSpamStrategy(AttackStrategy):
             self.input.mouse_up(curr_x, curr_y)
 
         if ev and ev.is_set():
-            return
+            return True
 
         frame = self.input.window_service.screenshot()
         if frame is not None:
-            self.deploy_spells(frame)
+            self.deploy_heroes(frame)
 
             if ev and ev.is_set():
-                return
+                return True
 
             frame = self.input.window_service.screenshot()
             if frame is not None:
-                self.deploy_heroes(frame)
+                self.deploy_spells(frame)
+        return True
