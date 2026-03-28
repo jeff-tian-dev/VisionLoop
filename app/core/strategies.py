@@ -137,10 +137,6 @@ class TroopSpamStrategy(AttackStrategy):
         ev = stop_event or self.stop_event
         logger.info(f"Executing {self.troop_name} strategy")
 
-        delay = random.randint(1, 2)
-        if ev and ev.wait(delay):
-            return True
-
         tx, ty = self.vision.find_template(frame, f"{self.troop_name}.png")
         if not tx:
             msg = f"Troop {self.troop_name} not found!"
@@ -149,7 +145,7 @@ class TroopSpamStrategy(AttackStrategy):
                 self.status_callback(msg)
             return False
 
-        self.input.click(tx, ty)
+        self.input.click(tx, ty, pause=0.3)
         if ev and ev.wait(0.2):
             return True
 
