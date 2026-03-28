@@ -6,8 +6,28 @@ from app.utils.logger import setup_logger
 
 logger = setup_logger("VisionService")
 
+# Battle bar UI (troops, spells, heroes, siege) and end-of-battle controls sit on the lower half of the screen.
+BOTTOM_HALF_BOT_TEMPLATES = frozenset(
+    {
+        "attack.png",
+        "findmatch.png",
+        "attack2.png",
+        "find.png",
+        "surrender.png",
+        "endbattle.png",
+    }
+)
+
+
 class VisionService:
     """Handles image recognition and processing."""
+
+    @staticmethod
+    def bottom_half_region(screen_img: np.ndarray) -> Tuple[int, int, int, int]:
+        """ROI (x, y, w, h) covering the bottom half of the screenshot."""
+        h, w = screen_img.shape[:2]
+        y0 = h // 2
+        return (0, y0, w, h - y0)
 
     @staticmethod
     def find_template(

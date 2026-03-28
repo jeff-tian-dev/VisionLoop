@@ -5,7 +5,7 @@ from typing import Optional, Callable, Tuple
 from app.config import Config
 from app.services.window import WindowService
 from app.services.input import InputService
-from app.services.vision import VisionService
+from app.services.vision import VisionService, BOTTOM_HALF_BOT_TEMPLATES
 from app.core.strategies import TroopSpamStrategy
 from app.utils.logger import setup_logger
 
@@ -203,8 +203,9 @@ class Bot:
                     return
                 continue
 
-            # No popup; if we see Attack button, we are home
-            ax, ay = self.vision.find_template(frame, "attack.png")
+            # No popup; if we see Attack button, we are home (bar is bottom half)
+            roi = VisionService.bottom_half_region(frame)
+            ax, ay = self.vision.find_template(frame, "attack.png", region=roi)
             if ax:
                 return
 
@@ -218,7 +219,10 @@ class Bot:
             frame = self.window.screenshot()
             if frame is None: continue
             
-            x, y = self.vision.find_template(frame, template)
+            region = None
+            if template in BOTTOM_HALF_BOT_TEMPLATES:
+                region = VisionService.bottom_half_region(frame)
+            x, y = self.vision.find_template(frame, template, region=region)
             if x: return x, y
             if self.stop_event.wait(0.5):
                 return None, None

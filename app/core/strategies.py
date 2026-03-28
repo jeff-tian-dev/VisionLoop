@@ -62,7 +62,10 @@ class AttackStrategy:
         deployed_heroes = []
 
         # Deploy Log Launcher
-        lx, ly = self.vision.find_template(frame, "loglauncher.png", threshold=0.7)
+        roi = self.vision.bottom_half_region(frame)
+        lx, ly = self.vision.find_template(
+            frame, "loglauncher.png", threshold=0.7, region=roi
+        )
         if lx:
             deploy_point = self._get_hero_deploy_point()
             self.input.click(lx, ly, pause=0.2, rand=False)
@@ -70,7 +73,9 @@ class AttackStrategy:
 
         # Loop 1: Deploy Heroes
         for hero in heroes:
-            bx, by = self.vision.find_template(frame, f"{hero}.png", threshold=0.7)
+            bx, by = self.vision.find_template(
+                frame, f"{hero}.png", threshold=0.7, region=roi
+            )
             if not bx:
                 continue
                 
@@ -108,7 +113,8 @@ class AttackStrategy:
         return int(x), int(y)
 
     def deploy_spells(self, frame):
-        bx, by = self.vision.find_template(frame, "earthquake.png")
+        roi = self.vision.bottom_half_region(frame)
+        bx, by = self.vision.find_template(frame, "earthquake.png", region=roi)
         if bx:
             self.input.click(bx, by, pause=0.2)
             corners = ["left", "top", "right"]
@@ -137,7 +143,10 @@ class TroopSpamStrategy(AttackStrategy):
         ev = stop_event or self.stop_event
         logger.info(f"Executing {self.troop_name} strategy")
 
-        tx, ty = self.vision.find_template(frame, f"{self.troop_name}.png")
+        roi = self.vision.bottom_half_region(frame)
+        tx, ty = self.vision.find_template(
+            frame, f"{self.troop_name}.png", region=roi
+        )
         if not tx:
             msg = f"Troop {self.troop_name} not found!"
             logger.warning(msg)
