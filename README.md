@@ -60,10 +60,21 @@ When **Star Bonus** is enabled, the bot runs until the empty star icon is no lon
 
 ### Building an Executable
 
-To create a standalone `.exe`:
+Tesseract OCR is bundled into the `.exe` when you use the spec file (Windows). First copy your Tesseract install into `build_assets/tesseract` (ignored by git):
 
 ```bash
-python -m PyInstaller --noconfirm --onefile --windowed --name "ClashAutoLoot" --add-data "templates;templates" --paths "." --hidden-import "app" --hidden-import "app.ui" --hidden-import "app.core" --hidden-import "app.services" --hidden-import "app.utils" "app/main.py"
+python scripts/prepare_tesseract_bundle.py
+python -m PyInstaller --noconfirm ClashAutoLoot.spec
+```
+
+The frozen app resolves `tesseract.exe` and `tessdata` from the PyInstaller temp folder automatically (`app.utils.tesseract_env`).
+
+**Without the bundle step**, the spec still builds, but OCR features will only work if Tesseract is installed on the target PC or you set the `TESSERACT_CMD` environment variable.
+
+**One-liner without the spec** (no bundled Tesseract; templates only):
+
+```bash
+python -m PyInstaller --noconfirm --onefile --windowed --name "ClashAutoLoot" --add-data "templates;templates" --paths "." --hidden-import "app" --hidden-import "app.ui" --hidden-import "app.core" --hidden-import "app.services" --hidden-import "app.utils" --hidden-import "pytesseract" "app/main.py"
 ```
 
 ## Project Structure

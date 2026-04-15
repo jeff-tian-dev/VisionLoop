@@ -56,7 +56,7 @@ class AttackStrategy:
         self._troop_spam_helper(next_corner, direction, iteration + 1, duration)
 
     def deploy_heroes(self, frame):
-        heroes = ["queen", "warden", "RC", "king", "prince"]
+        heroes = ["queen", "warden", "RC", "king", "prince", "dragonduke"]
         random.shuffle(heroes)
         
         deployed_heroes = []

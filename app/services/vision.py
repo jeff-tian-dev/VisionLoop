@@ -1,10 +1,37 @@
+import math
+import re
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
+from PIL import Image
 from typing import Optional, Tuple, List
+
 from app.utils.common import get_resource_path
 from app.utils.logger import setup_logger
 
+try:
+    import pytesseract
+except ImportError:  # pragma: no cover - optional until pip install
+    pytesseract = None  # type: ignore
+
 logger = setup_logger("VisionService")
+
+
+@dataclass(frozen=True)
+class OcrWordBox:
+    """A single word bounding box in **screen** coordinates (matches `screen_img`)."""
+
+    left: int
+    top: int
+    width: int
+    height: int
+    text: str
+    confidence: float
+
+    @property
+    def center(self) -> Tuple[int, int]:
+        return self.left + self.width // 2, self.top + self.height // 2
 
 # Battle bar UI (troops, spells, heroes, siege) and end-of-battle controls sit on the lower half of the screen.
 BOTTOM_HALF_BOT_TEMPLATES = frozenset(
@@ -237,3 +264,163 @@ class VisionService:
             
         min_idx = np.argmin(xs)
         return int(xs[min_idx]), int(ys[min_idx])
+
+    @staticmethod
+    def preprocess_bw_ui_text(bgr: np.ndarray) -> np.ndarray:
+        """
+        Normalize screenshot regions that look like `testplayerfont.png`: dark glyphs on a light field.
+        Produces a single-channel image suitable for Tesseract.
+        """
+        if bgr is None or bgr.size == 0:
+            return bgr
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return binary
+
+    @staticmethod
+    def find_words_ocr(
+        screen_img: np.ndarray,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        query: Optional[str] = None,
+        min_confidence: int = 30,
+        case_sensitive: bool = False,
+        preprocess: bool = True,
+        tesseract_config: str = "--psm 11",
+    ) -> List[OcrWordBox]:
+        """
+        Locate words via OCR. Tuned for high-contrast black (or dark) text on white / light backgrounds,
+        similar to ``templates/testplayerfont.png``.
+
+        Requires the ``tesseract`` binary on PATH (Windows: install from
+        https://github.com/UB-Mannheim/tesseract/wiki ) and ``pip install pytesseract``.
+
+        Args:
+            screen_img: BGR screenshot (e.g. from ``WindowService.screenshot()``).
+            region: Optional ROI ``(x, y, w, h)`` in screen coordinates.
+            query: If set, only return words whose text contains this substring (after normalization).
+            min_confidence: Tesseract confidence 0–100; words below this are dropped.
+            case_sensitive: Match behavior when ``query`` is set.
+            preprocess: If True, apply Otsu binarization (good for clean UI text).
+            tesseract_config: Extra Tesseract CLI flags (default sparse text for scattered labels).
+
+        Returns:
+            List of ``OcrWordBox`` in full-screen coordinates (including ROI offset).
+        """
+        if pytesseract is None:
+            logger.error("pytesseract is not installed; pip install pytesseract and install the Tesseract OCR binary")
+            return []
+
+        if screen_img is None or screen_img.size == 0:
+            return []
+
+        offset_x, offset_y = 0, 0
+        work = screen_img
+        if region is not None:
+            rx, ry, rw, rh = region
+            h_s, w_s = screen_img.shape[:2]
+            if rx < 0 or ry < 0 or rx + rw > w_s or ry + rh > h_s:
+                logger.warning(f"OCR region {region} out of bounds for image {w_s}x{h_s}")
+                return []
+            work = screen_img[ry : ry + rh, rx : rx + rw]
+            offset_x, offset_y = rx, ry
+
+        if preprocess:
+            mono = VisionService.preprocess_bw_ui_text(work)
+        else:
+            mono = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+
+        pil = Image.fromarray(mono)
+        try:
+            data = pytesseract.image_to_data(
+                pil, output_type=pytesseract.Output.DICT, config=tesseract_config
+            )
+        except pytesseract.TesseractNotFoundError:
+            logger.error(
+                "Tesseract executable not found. Install Tesseract and ensure it is on PATH "
+                "(e.g. Windows installer from UB Mannheim)."
+            )
+            return []
+
+        n = len(data.get("text", []))
+        qnorm = None
+        if query is not None:
+            qnorm = query if case_sensitive else query.lower()
+
+        def _norm(s: str) -> str:
+            s = s.strip()
+            return s if case_sensitive else s.lower()
+
+        words: List[OcrWordBox] = []
+        for i in range(n):
+            raw = (data["text"][i] or "").strip()
+            if not raw:
+                continue
+            try:
+                conf = int(data["conf"][i])
+            except (ValueError, TypeError):
+                conf = -1
+            if conf >= 0 and conf < min_confidence:
+                continue
+            if qnorm is not None and qnorm not in _norm(raw):
+                continue
+
+            left = int(data["left"][i]) + offset_x
+            top = int(data["top"][i]) + offset_y
+            w = int(data["width"][i])
+            h = int(data["height"][i])
+            words.append(
+                OcrWordBox(
+                    left=left,
+                    top=top,
+                    width=w,
+                    height=h,
+                    text=raw,
+                    confidence=float(conf) if conf >= 0 else math.nan,
+                )
+            )
+        return words
+
+    @staticmethod
+    def find_word_on_screen(
+        screen_img: np.ndarray,
+        word_or_phrase: str,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        **kwargs,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Returns the center ``(x, y)`` of the first OCR match whose text contains ``word_or_phrase``,
+        or ``(None, None)`` if not found. Same preprocessing and Tesseract requirements as
+        :meth:`find_words_ocr`. Extra kwargs are forwarded (e.g. ``min_confidence``, ``preprocess``).
+        """
+        matches = VisionService.find_words_ocr(
+            screen_img, region=region, query=word_or_phrase, **kwargs
+        )
+        if not matches:
+            return None, None
+        cx, cy = matches[0].center
+        return cx, cy
+
+    @staticmethod
+    def find_words_regex(
+        screen_img: np.ndarray,
+        pattern: str,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        min_confidence: int = 30,
+        preprocess: bool = True,
+        tesseract_config: str = "--psm 11",
+        flags: int = re.IGNORECASE,
+    ) -> List[OcrWordBox]:
+        """Like :meth:`find_words_ocr` but filter word text with a regex ``pattern``."""
+        all_words = VisionService.find_words_ocr(
+            screen_img,
+            region=region,
+            query=None,
+            min_confidence=min_confidence,
+            preprocess=preprocess,
+            tesseract_config=tesseract_config,
+        )
+        rx = re.compile(pattern, flags)
+        return [w for w in all_words if rx.search(w.text)]

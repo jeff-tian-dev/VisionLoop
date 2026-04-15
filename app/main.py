@@ -7,11 +7,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.ui.gui import run_gui
 from app.utils.logger import setup_logger
+from app.utils.tesseract_env import configure_tesseract
 
 logger = setup_logger("Main")
 
 def main():
     try:
+        configure_tesseract()
         logger.info("Starting Application...")
         run_gui()
     except Exception as e:

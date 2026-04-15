@@ -1,13 +1,15 @@
 import time
 import random
 import threading
-from typing import Optional, Callable, Tuple
+from typing import List, Optional, Tuple
+
 from app.config import Config
-from app.services.window import WindowService
+from app.core.strategies import TroopSpamStrategy
 from app.services.input import InputService
 from app.services.vision import VisionService, BOTTOM_HALF_BOT_TEMPLATES
-from app.core.strategies import TroopSpamStrategy
+from app.services.window import WindowService
 from app.utils.logger import setup_logger
+from app.utils.player_list_store import PlayerEntry
 
 logger = setup_logger("BotCore")
 
@@ -22,8 +24,16 @@ class Bot:
         self.vision = VisionService()
         self.running = False
 
-    def start(self, method: int, run_time_minutes: int, upgrade_walls: bool, star_bonus: bool = False, status_callback=None):
-        """Starts the bot loop."""
+    def start(
+        self,
+        method: int,
+        run_time_minutes: int,
+        upgrade_walls: bool,
+        star_bonus: bool = False,
+        status_callback=None,
+        multi_run_players: Optional[List[PlayerEntry]] = None,
+    ):
+        """Starts the bot loop. With ``multi_run_players``, runs a full session per enabled player."""
         self._status_callback = status_callback
         # Re-find window each time farming starts (hwnd changes when game is closed/reopened)
         if not self.window.find_window():
@@ -33,10 +43,25 @@ class Bot:
         self.stop_event.clear()
 
         duration = 900 if star_bonus else run_time_minutes * 60  # 15 min hard cap for star bonus
-        logger.info(f"Bot started. Method: {method}, Time: {run_time_minutes}m, Walls: {upgrade_walls}, StarBonus: {star_bonus}")
+        mr = multi_run_players is not None
+        logger.info(
+            f"Bot started. Method: {method}, Time: {run_time_minutes}m, Walls: {upgrade_walls}, "
+            f"StarBonus: {star_bonus}, MultiRun: {mr}"
+        )
 
         try:
-            self._run_loop(method, duration, upgrade_walls, star_bonus)
+            if multi_run_players is not None:
+                queue = [p for p in multi_run_players if p.enabled]
+                if not queue:
+                    raise RuntimeError("Multi-run: no players marked Run")
+                for player in queue:
+                    self._check_stop()
+                    self._switch_account_and_load_home(player.name)
+                    self._check_stop()
+                    self._run_loop(method, duration, upgrade_walls, star_bonus)
+                    self._check_stop()
+            else:
+                self._run_loop(method, duration, upgrade_walls, star_bonus)
         except InterruptedError:
             pass
         except Exception as e:
@@ -67,6 +92,13 @@ class Bot:
         self.input.scroll(1000, 1000, 20)
         delay = random.uniform(0.1, 0.3)
         if self.stop_event.wait(delay):
+            return
+
+        # Star bonus: only farm if the empty-star icon is visible (bonus still to earn/claim).
+        if star_bonus and self._is_star_bonus_claimed():
+            logger.info(
+                "Star bonus mode: emptystar.png not found on home — nothing to collect. Finishing without attacks."
+            )
             return
 
         while time.time() - start_time < duration_seconds:
@@ -110,15 +142,20 @@ class Bot:
         fx, fy = self._wait_for_image("findmatch.png")
         if not fx: return False
         self.input.click(fx, fy, pause=0.1)
-        
+
+        # Valkyrie: verify army / load recipe before confirming attack (attack2.png)
+        if method_id == 3 and not self._ensure_valkyrie_army_from_recipes():
+            return False
+
         # Click Attack (Confirm?)
-        a2x, a2y = self._wait_for_image("attack2.png") # Sometimes needed
-        if a2x: self.input.click(a2x, a2y, pause=0.1)
+        a2x, a2y = self._wait_for_image("attack2.png")  # Sometimes needed
+        if a2x:
+            self.input.click(a2x, a2y, pause=0.1)
 
         # Wait for "Find" screen (clouds) to disappear -> Base found
         # Actually logic is: wait until "find.png" (Next button) is visible
         self._wait_for_image("find.png", timeout=30)
-        
+
         # Execute Strategy
         frame = self.window.screenshot()
         if frame is None: return False
@@ -175,7 +212,7 @@ class Bot:
         return ox is not None
 
     def _is_star_bonus_claimed(self) -> bool:
-        """Returns True if emptystar.png is NOT found on home screen (star bonus claimed)."""
+        """True if emptystar.png is absent or weak match (bonus already claimed / not available)."""
         EMPTYSTAR_THRESHOLD = 0.75
         frame = self.window.screenshot()
         if frame is None:
@@ -212,21 +249,238 @@ class Bot:
             if self.stop_event.wait(1):
                 return
 
-    def _wait_for_image(self, template: str, timeout: int = 10, error: bool = True) -> Tuple[Optional[int], Optional[int]]:
+    def _switch_account_and_load_home(self, username: str) -> None:
+        """Open Settings → Change user, OCR-click username, wait for home. Raises on failure."""
+        cb = getattr(self, "_status_callback", None)
+        msg = f"Multi-run: switching to {username!r}"
+        logger.info(msg)
+        if cb:
+            cb(msg)
+
+        stx, sty = self._wait_for_image("settings.png")
+        if not stx:
+            raise RuntimeError("Multi-run: settings button not found")
+        self.input.click(stx, sty, pause=0.25)
+
+        cux, cuy = self._wait_for_image("changeuser.png")
+        if not cux:
+            raise RuntimeError("Multi-run: change user button not found")
+        self.input.click(cux, cuy, pause=0.25)
+
+        ucx, ucy = self._wait_for_player_name(
+            username,
+            timeout=25,
+            min_confidence=25,
+            tesseract_config="--psm 11",
+        )
+        if not ucx:
+            err = f'Multi-run: could not find username "{username}" on screen (OCR)'
+            logger.error(err)
+            if cb:
+                cb(err)
+            raise RuntimeError(err)
+        self.input.click(ucx, ucy, pause=0.2)
+
+        ax, ay = self._wake_home_and_wait_for_attack(timeout=30)
+        if not ax:
+            err = f"Multi-run: home not ready after loading {username!r} (attack.png timeout)"
+            logger.error(err)
+            if cb:
+                cb(err)
+            raise RuntimeError(err)
+
+    def _wake_home_and_wait_for_attack(
+        self, timeout: int = 30
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """
+        After switching accounts: same idea as session start — click bottom, scroll once, then
+        repeatedly click the empty / bottom area while scanning the lower half for attack.png.
+        """
+        empty_pt = self.config.get_point("empty")
+        self.input.click(*empty_pt, pause=0.2)
+        self.input.scroll(1000, 1000, 20)
+        delay = random.uniform(0.1, 0.3)
+        if self.stop_event.wait(delay):
+            return None, None
+
         start = time.time()
         while time.time() - start < timeout:
             self._check_stop()
             frame = self.window.screenshot()
-            if frame is None: continue
-            
-            region = None
-            if template in BOTTOM_HALF_BOT_TEMPLATES:
-                region = VisionService.bottom_half_region(frame)
-            x, y = self.vision.find_template(frame, template, region=region)
-            if x: return x, y
+            if frame is not None:
+                roi = VisionService.bottom_half_region(frame)
+                ax, ay = self.vision.find_template(frame, "attack.png", region=roi)
+                if ax:
+                    return ax, ay
+            self.input.click(*empty_pt, pause=0.15)
+            if self.stop_event.wait(0.35):
+                return None, None
+        return None, None
+
+    def _frame_shows_supercell_login_prompt(self, frame) -> bool:
+        """True if OCR sees the Supercell ID login line (list scroll won't help)."""
+        if frame is None or frame.size == 0:
+            return False
+        words = self.vision.find_words_ocr(
+            frame,
+            query=None,
+            min_confidence=20,
+            preprocess=True,
+            tesseract_config="--psm 11",
+        )
+        blob = " ".join(w.text for w in words).lower()
+        if "supercell id" in blob:
+            return True
+        if "log in" in blob and "supercell" in blob:
+            return True
+        return False
+
+    def _scroll_player_list_with_drag(self, frame) -> None:
+        """Drag ~200px upward from lower-right (client coords) to scroll the change-user list."""
+        if frame is None or frame.size == 0:
+            return
+        h, w = frame.shape[:2]
+        x1 = int(w * 0.86) + random.randint(-15, 15)
+        x1 = max(int(w * 0.72), min(w - 8, x1))
+        y1 = int(h * 0.86) + random.randint(-12, 12)
+        y1 = max(int(h * 0.55), min(h - 12, y1))
+        y2 = max(int(h * 0.12), y1 - 200)
+        x2 = x1
+        self.input.mouse_down(x1, y1)
+        self.input.human_move(x1, y1, x2, y2, duration=random.uniform(0.28, 0.42))
+        self.input.mouse_up(x2, y2)
+
+    def _wait_for_player_name(
+        self,
+        text: str,
+        timeout: int = 25,
+        error: bool = True,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        **ocr_kwargs,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Like :meth:`_wait_for_text`, but after each failed OCR pass drags upward in the lower-right
+        to scroll the account list before trying again.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                if self.stop_event.wait(0.5):
+                    return None, None
+                continue
+            x, y = self.vision.find_word_on_screen(frame, text, region=region, **ocr_kwargs)
+            if x:
+                return x, y
+            if self._frame_shows_supercell_login_prompt(frame):
+                msg = (
+                    f'Multi-run: "Log in to Supercell ID" is showing and {text!r} was not found — '
+                    "log in or dismiss that screen, then retry."
+                )
+                logger.warning(msg)
+                cb = getattr(self, "_status_callback", None)
+                if cb:
+                    cb(msg)
+                raise RuntimeError(msg)
+            self._scroll_player_list_with_drag(frame)
+            if self.stop_event.wait(0.45):
+                return None, None
+        if error:
+            logger.warning(f"Timeout waiting for player name OCR match: {text!r}")
+        return None, None
+
+    def _wait_for_text(
+        self,
+        text: str,
+        timeout: int = 10,
+        error: bool = True,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        **ocr_kwargs,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """Poll screenshots until OCR finds ``text`` (substring match). Returns click center."""
+        start = time.time()
+        while time.time() - start < timeout:
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                if self.stop_event.wait(0.5):
+                    return None, None
+                continue
+            x, y = self.vision.find_word_on_screen(frame, text, region=region, **ocr_kwargs)
+            if x:
+                return x, y
             if self.stop_event.wait(0.5):
                 return None, None
-            
+        if error:
+            logger.warning(f"Timeout waiting for OCR text containing {text!r}")
+        return None, None
+
+    def _ensure_valkyrie_army_from_recipes(self) -> bool:
+        """If Valkyrie army template is missing, load it from Saved Recipes. Returns False on failure."""
+        vx, vy = self._wait_for_image("valkarmy.png", timeout=3, error=False)
+        if vx:
+            return True
+
+        sx, sy = self._wait_for_image("savedrecipes.png")
+        if not sx:
+            logger.warning("Saved Recipes button not found while ensuring Valkyrie army")
+            return False
+        self.input.click(sx, sy, pause=0.2)
+
+        rx, ry = self._wait_for_image("valkrecipe.png")
+        if not rx:
+            logger.warning("Valkyrie recipe template not found")
+            return False
+
+        ux, uy = self._wait_for_image("use.png", y_anchor=ry, y_slop=200)
+        if not ux:
+            logger.warning("Use button not found near Valkyrie recipe row")
+            return False
+        self.input.click(ux, uy, pause=0.2)
+
+        if self.stop_event.wait(0.35):
+            return False
+        vx2, _ = self._wait_for_image("valkarmy.png", timeout=5, error=False)
+        if not vx2:
+            logger.warning("valkarmy.png still not visible after applying saved recipe")
+            return False
+        return True
+
+    def _wait_for_image(
+        self,
+        template: str,
+        timeout: int = 10,
+        error: bool = True,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        y_anchor: Optional[int] = None,
+        y_slop: int = 200,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        start = time.time()
+        while time.time() - start < timeout:
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                continue
+
+            if region is not None:
+                search_region = region
+            elif y_anchor is not None:
+                h, w = frame.shape[:2]
+                y0 = max(0, y_anchor - y_slop)
+                y1 = min(h, y_anchor + y_slop)
+                search_region = (0, y0, w, y1 - y0)
+            elif template in BOTTOM_HALF_BOT_TEMPLATES:
+                search_region = VisionService.bottom_half_region(frame)
+            else:
+                search_region = None
+
+            x, y = self.vision.find_template(frame, template, region=search_region)
+            if x:
+                return x, y
+            if self.stop_event.wait(0.5):
+                return None, None
+
         if error:
             logger.warning(f"Timeout waiting for {template}")
         return None, None
