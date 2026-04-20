@@ -1,3 +1,4 @@
+import math
 import time
 import random
 from typing import List, Tuple
@@ -112,24 +113,97 @@ class AttackStrategy:
         y = c1[1] + (c2[1] - c1[1]) * t
         return int(x), int(y)
 
+    @staticmethod
+    def _earthquake_anchor_triplet(data: dict, offset: int) -> Tuple[Tuple[float, float], ...]:
+        """Left / top / right drop anchors (same nudge as legacy earthquake logic)."""
+        lx, ly = data["left"]
+        lx += int(offset * 1.3)
+        tx, ty = data["top"]
+        ty += int(offset)
+        rx, ry = data["right"]
+        rx -= int(offset * 1.3)
+        return (float(lx), float(ly)), (float(tx), float(ty)), (float(rx), float(ry))
+
+    @staticmethod
+    def _sample_arc_through_three(
+        ltr: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]],
+        n: int,
+    ) -> List[Tuple[int, int]]:
+        """
+        ``n`` points along a circular arc from L to R that passes through T.
+        If L,T,R are collinear, uses a quadratic Bezier with control point chosen so t=0.5 hits T.
+        """
+        L, T, R = ltr
+        ax, ay = L
+        bx, by = T
+        cx, cy = R
+        d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+
+        if n < 2:
+            return [(int(round(L[0])), int(round(L[1])))]
+
+        if abs(d) < 1e-6:
+            # Collinear: Bezier B(t) with B(0)=L, B(1)=R, B(0.5)=T  =>  P1 = 2T - L/2 - R/2
+            p1x = 2 * bx - 0.5 * ax - 0.5 * cx
+            p1y = 2 * by - 0.5 * ay - 0.5 * cy
+            out: List[Tuple[int, int]] = []
+            for i in range(n):
+                t = i / (n - 1)
+                u = 1.0 - t
+                x = u * u * ax + 2 * u * t * p1x + t * t * cx
+                y = u * u * ay + 2 * u * t * p1y + t * t * cy
+                out.append((int(round(x)), int(round(y))))
+            return out
+
+        a2 = ax * ax + ay * ay
+        b2 = bx * bx + by * by
+        c2 = cx * cx + cy * cy
+        ox = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
+        oy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
+        r = math.hypot(ax - ox, ay - oy)
+
+        def ang(p: Tuple[float, float]) -> float:
+            return math.atan2(p[1] - oy, p[0] - ox)
+
+        phi_l, phi_t, phi_r = ang(L), ang(T), ang(R)
+        two_pi = 2.0 * math.pi
+        ccw_span = (phi_r - phi_l) % two_pi
+        t_ccw = (phi_t - phi_l) % two_pi
+        if t_ccw <= ccw_span:
+            sweep = ccw_span
+        else:
+            sweep = ccw_span - two_pi
+
+        out = []
+        for i in range(n):
+            t = i / (n - 1)
+            phi = phi_l + t * sweep
+            x = ox + r * math.cos(phi)
+            y = oy + r * math.sin(phi)
+            out.append((int(round(x)), int(round(y))))
+        return out
+
     def deploy_spells(self, frame):
         roi = self.vision.bottom_half_region(frame)
         bx, by = self.vision.find_template(frame, "earthquake.png", region=roi)
         if bx:
             self.input.click(bx, by, pause=0.2)
-            corners = ["left", "top", "right"]
-            random.shuffle(corners)
-            
-            offset = self.data.get("earthquake", 400)
-            
-            for corner in corners[:3]:
-                cx, cy = self.data[corner]
-                if corner == "left": cx += int(offset * 1.3)
-                elif corner == "top": cy += offset
-                else: cx -= int(offset * 1.3)
-                
-                for _ in range(4):
-                    self.input.click(cx, cy, pause=0.1)
+            offset = int(self.data.get("earthquake", 400))
+            ltr = self._earthquake_anchor_triplet(self.data, offset)
+            points = self._sample_arc_through_three(ltr, 11)
+            if random.choice((True, False)):
+                points.reverse()
+            eq_pause_base = 0.1
+            jitter_px = 30
+            for cx, cy in points:
+                jx = cx + random.randint(-jitter_px, jitter_px)
+                jy = cy + random.randint(-jitter_px, jitter_px)
+                self.input.click_at(jx, jy, rand=False)
+                delay = eq_pause_base * random.uniform(0.7, 1.3)
+                if self.stop_event:
+                    self.stop_event.wait(delay)
+                else:
+                    time.sleep(delay)
 
 
 class TroopSpamStrategy(AttackStrategy):
@@ -147,14 +221,15 @@ class TroopSpamStrategy(AttackStrategy):
         tx, ty = self.vision.find_template(
             frame, f"{self.troop_name}.png", region=roi
         )
-        if not tx:
+        if tx is None:
             msg = f"Troop {self.troop_name} not found!"
             logger.warning(msg)
             if self.status_callback:
                 self.status_callback(msg)
             return False
 
-        self.input.click(tx, ty, pause=0.3)
+        # Match hero/siege clicks: no ±15px jitter — bar icons are tight; random misses the card.
+        self.input.click(tx, ty, pause=0.3, rand=False)
         if ev and ev.wait(0.2):
             return True
 

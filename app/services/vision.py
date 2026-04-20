@@ -1,3 +1,4 @@
+import difflib
 import math
 import re
 from dataclasses import dataclass
@@ -55,6 +56,13 @@ class VisionService:
         h, w = screen_img.shape[:2]
         y0 = h // 2
         return (0, y0, w, h - y0)
+
+    @staticmethod
+    def right_half_region(screen_img: np.ndarray) -> Tuple[int, int, int, int]:
+        """ROI (x, y, w, h) covering the right half of the screenshot."""
+        h, w = screen_img.shape[:2]
+        x0 = w // 2
+        return (x0, 0, w - x0, h)
 
     @staticmethod
     def find_template(
@@ -279,6 +287,102 @@ class VisionService:
         return binary
 
     @staticmethod
+    def _ocr_query_matches(
+        raw: str,
+        query_norm: str,
+        *,
+        case_sensitive: bool,
+        match_alnum_only: bool,
+        fuzzy_min_ratio: Optional[float],
+    ) -> bool:
+        if not query_norm:
+            return False
+
+        def norm_text(s: str) -> str:
+            s = s.strip()
+            return s if case_sensitive else s.lower()
+
+        r = norm_text(raw)
+        if query_norm in r:
+            return True
+
+        if match_alnum_only:
+            ar = re.sub(r"[^a-z0-9]", "", r.lower())
+            aq = re.sub(r"[^a-z0-9]", "", query_norm.lower())
+            if aq and aq in ar:
+                return True
+            # OCR is a fragment of the configured name — require a large enough fragment so
+            # two-letter side labels cannot match a long username.
+            if (
+                aq
+                and ar
+                and ar in aq
+                and len(ar) >= max(4, int(0.55 * len(aq)))
+            ):
+                return True
+
+        if fuzzy_min_ratio is not None:
+            cr = (
+                re.sub(r"[^a-z0-9]", "", r.lower())
+                if match_alnum_only
+                else (r if case_sensitive else r.lower())
+            )
+            cq = (
+                re.sub(r"[^a-z0-9]", "", query_norm.lower())
+                if match_alnum_only
+                else query_norm
+            )
+            if len(cq) < 3:
+                return False
+            lo, hi = sorted((len(cr), len(cq)))
+            if hi and lo / hi < 0.5:
+                return False
+            ratio = difflib.SequenceMatcher(None, cq, cr).ratio()
+            if ratio >= fuzzy_min_ratio:
+                return True
+
+        return False
+
+    @staticmethod
+    def _ocr_username_match_tier(
+        raw: str,
+        query_norm: str,
+        *,
+        case_sensitive: bool,
+        match_alnum_only: bool,
+        fuzzy_min_ratio: Optional[float],
+    ) -> int:
+        """
+        Rank how well ``raw`` matches the username (higher is better).
+        Used to pick a click target: prefer full name in OCR, then longest token, then confidence.
+        """
+        if not query_norm:
+            return 0
+
+        def norm_text(s: str) -> str:
+            s = s.strip()
+            return s if case_sensitive else s.lower()
+
+        r = norm_text(raw)
+        ar = re.sub(r"[^a-z0-9]", "", r.lower()) if match_alnum_only else ""
+        aq = re.sub(r"[^a-z0-9]", "", query_norm.lower()) if match_alnum_only else ""
+
+        if match_alnum_only and aq and aq in ar:
+            return 3
+        if query_norm in r:
+            return 2
+        if (
+            match_alnum_only
+            and aq
+            and ar
+            and ar in aq
+            and len(ar) >= max(4, int(0.55 * len(aq)))
+        ):
+            return 1
+        # Remaining hits are fuzzy-only (still a valid match from find_words_ocr).
+        return 0
+
+    @staticmethod
     def find_words_ocr(
         screen_img: np.ndarray,
         region: Optional[Tuple[int, int, int, int]] = None,
@@ -288,6 +392,8 @@ class VisionService:
         case_sensitive: bool = False,
         preprocess: bool = True,
         tesseract_config: str = "--psm 11",
+        match_alnum_only: bool = False,
+        fuzzy_min_ratio: Optional[float] = None,
     ) -> List[OcrWordBox]:
         """
         Locate words via OCR. Tuned for high-contrast black (or dark) text on white / light backgrounds,
@@ -304,6 +410,10 @@ class VisionService:
             case_sensitive: Match behavior when ``query`` is set.
             preprocess: If True, apply Otsu binarization (good for clean UI text).
             tesseract_config: Extra Tesseract CLI flags (default sparse text for scattered labels).
+            match_alnum_only: If True with ``query``, also match after stripping non-alphanumeric characters
+                and allow substring match either way on the compact strings.
+            fuzzy_min_ratio: If set (e.g. ``0.8``), also accept tokens whose string similarity to the
+                query reaches this ratio (SequenceMatcher).
 
         Returns:
             List of ``OcrWordBox`` in full-screen coordinates (including ROI offset).
@@ -346,11 +456,7 @@ class VisionService:
         n = len(data.get("text", []))
         qnorm = None
         if query is not None:
-            qnorm = query if case_sensitive else query.lower()
-
-        def _norm(s: str) -> str:
-            s = s.strip()
-            return s if case_sensitive else s.lower()
+            qnorm = query.strip() if case_sensitive else query.strip().lower()
 
         words: List[OcrWordBox] = []
         for i in range(n):
@@ -363,7 +469,13 @@ class VisionService:
                 conf = -1
             if conf >= 0 and conf < min_confidence:
                 continue
-            if qnorm is not None and qnorm not in _norm(raw):
+            if qnorm is not None and not VisionService._ocr_query_matches(
+                raw,
+                qnorm,
+                case_sensitive=case_sensitive,
+                match_alnum_only=match_alnum_only,
+                fuzzy_min_ratio=fuzzy_min_ratio,
+            ):
                 continue
 
             left = int(data["left"][i]) + offset_x
@@ -383,6 +495,10 @@ class VisionService:
         return words
 
     @staticmethod
+    def _ocr_confidence_key(w: OcrWordBox) -> float:
+        return -1.0 if math.isnan(w.confidence) else float(w.confidence)
+
+    @staticmethod
     def find_word_on_screen(
         screen_img: np.ndarray,
         word_or_phrase: str,
@@ -390,17 +506,44 @@ class VisionService:
         **kwargs,
     ) -> Tuple[Optional[int], Optional[int]]:
         """
-        Returns the center ``(x, y)`` of the first OCR match whose text contains ``word_or_phrase``,
-        or ``(None, None)`` if not found. Same preprocessing and Tesseract requirements as
-        :meth:`find_words_ocr`. Extra kwargs are forwarded (e.g. ``min_confidence``, ``preprocess``).
+        Returns the center ``(x, y)`` of the best OCR match for ``word_or_phrase``, or
+        ``(None, None)`` if not found.
+
+        Among all tokens that pass filters, picks by: (1) **full alnum name inside OCR token**,
+        (2) plain substring, (3) long name fragment, (4) fuzzy; then **longest** OCR token,
+        then Tesseract confidence — so a short side label does not beat the full username.
+        Extra kwargs are forwarded (e.g. ``min_confidence``, ``preprocess``).
         """
         matches = VisionService.find_words_ocr(
             screen_img, region=region, query=word_or_phrase, **kwargs
         )
         if not matches:
             return None, None
-        cx, cy = matches[0].center
-        return cx, cy
+        case_sensitive = bool(kwargs.get("case_sensitive", False))
+        match_alnum_only = bool(kwargs.get("match_alnum_only", False))
+        fuzzy_min_ratio = kwargs.get("fuzzy_min_ratio")
+        qnorm = (
+            word_or_phrase.strip()
+            if case_sensitive
+            else word_or_phrase.strip().lower()
+        )
+
+        def pick_key(w: OcrWordBox) -> Tuple[int, int, float]:
+            tier = VisionService._ocr_username_match_tier(
+                w.text,
+                qnorm,
+                case_sensitive=case_sensitive,
+                match_alnum_only=match_alnum_only,
+                fuzzy_min_ratio=fuzzy_min_ratio,
+            )
+            if match_alnum_only:
+                alen = len(re.sub(r"[^a-z0-9]", "", w.text.lower()))
+            else:
+                alen = len(w.text.strip())
+            return (tier, alen, VisionService._ocr_confidence_key(w))
+
+        best = max(matches, key=pick_key)
+        return best.center
 
     @staticmethod
     def find_words_regex(

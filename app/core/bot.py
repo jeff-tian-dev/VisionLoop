@@ -94,10 +94,10 @@ class Bot:
         if self.stop_event.wait(delay):
             return
 
-        # Star bonus: only farm if the empty-star icon is visible (bonus still to earn/claim).
+        # Star bonus: only farm if empty- or glow-star icon is visible (bonus still to earn/claim).
         if star_bonus and self._is_star_bonus_claimed():
             logger.info(
-                "Star bonus mode: emptystar.png not found on home — nothing to collect. Finishing without attacks."
+                "Star bonus mode: no star bonus template matched on home — nothing to collect. Finishing without attacks."
             )
             return
 
@@ -125,10 +125,9 @@ class Bot:
             if self.stop_event.wait(random.uniform(0.15, 0.25)):
                 return
 
-            # Star Bonus mode: stop when emptystar.png is NOT found on home screen
-            # (empty star gone = star bonus claimed)
+            # Star Bonus mode: stop when neither emptystar nor glowstar matches on home
             if star_bonus and self._is_star_bonus_claimed():
-                logger.info("Star bonus claimed (empty star no longer visible). Stopping.")
+                logger.info("Star bonus claimed (star icons no longer visible). Stopping.")
                 break
 
     def _find_match_and_attack(self, method_id: int) -> bool:
@@ -156,9 +155,21 @@ class Bot:
         # Actually logic is: wait until "find.png" (Next button) is visible
         self._wait_for_image("find.png", timeout=30)
 
-        # Execute Strategy
+        # Base is visible: move cursor to center and nudge view (short wheel) before deploying
         frame = self.window.screenshot()
-        if frame is None: return False
+        if frame is None:
+            return False
+        h, w = frame.shape[:2]
+        cx, cy = w // 2, h // 2
+        self.input.move(cx, cy)
+        if self.stop_event.wait(0.05):
+            return False
+        self.input.scroll(cx, cy, 3)
+
+        # Fresh capture after input so strategy sees the settled view
+        frame = self.window.screenshot()
+        if frame is None:
+            return False
 
         strategy = self._get_strategy(method_id)
         result = strategy.execute(frame, self.stop_event)
@@ -212,15 +223,18 @@ class Bot:
         return ox is not None
 
     def _is_star_bonus_claimed(self) -> bool:
-        """True if emptystar.png is absent or weak match (bonus already claimed / not available)."""
-        EMPTYSTAR_THRESHOLD = 0.75
+        """True if neither emptystar nor glowstar matches strongly (bonus claimed / not shown)."""
+        STAR_BONUS_THRESHOLD = 0.75
         frame = self.window.screenshot()
         if frame is None:
             return False
-        _, _, confidence = self.vision.find_template_with_confidence(
-            frame, "emptystar.png", threshold=0.0
-        )
-        return confidence < EMPTYSTAR_THRESHOLD
+        for template in ("emptystar.png", "glowstar.png"):
+            _, _, confidence = self.vision.find_template_with_confidence(
+                frame, template, threshold=0.0
+            )
+            if confidence >= STAR_BONUS_THRESHOLD:
+                return False
+        return True
 
     def _home_screen_recovery(self):
         """Ensures we are back at home screen. Dismisses any Okay popup before considering home."""
@@ -265,13 +279,15 @@ class Bot:
         cux, cuy = self._wait_for_image("changeuser.png")
         if not cux:
             raise RuntimeError("Multi-run: change user button not found")
-        self.input.click(cux, cuy, pause=0.25)
+        self.input.click(cux, cuy, pause=1.0)
 
         ucx, ucy = self._wait_for_player_name(
             username,
             timeout=25,
-            min_confidence=25,
+            min_confidence=70,
             tesseract_config="--psm 11",
+            match_alnum_only=True,
+            fuzzy_min_ratio=0.8,
         )
         if not ucx:
             err = f'Multi-run: could not find username "{username}" on screen (OCR)'
@@ -280,6 +296,8 @@ class Bot:
                 cb(err)
             raise RuntimeError(err)
         self.input.click(ucx, ucy, pause=0.2)
+        if self.stop_event.wait(1.0):
+            self._check_stop()
 
         ax, ay = self._wake_home_and_wait_for_attack(timeout=30)
         if not ax:
@@ -361,6 +379,8 @@ class Bot:
         """
         Like :meth:`_wait_for_text`, but after each failed OCR pass drags upward in the lower-right
         to scroll the account list before trying again.
+
+        OCR is limited to the right half of the window unless ``region`` is passed explicitly.
         """
         start = time.time()
         while time.time() - start < timeout:
@@ -370,7 +390,8 @@ class Bot:
                 if self.stop_event.wait(0.5):
                     return None, None
                 continue
-            x, y = self.vision.find_word_on_screen(frame, text, region=region, **ocr_kwargs)
+            roi = region if region is not None else VisionService.right_half_region(frame)
+            x, y = self.vision.find_word_on_screen(frame, text, region=roi, **ocr_kwargs)
             if x:
                 return x, y
             if self._frame_shows_supercell_login_prompt(frame):

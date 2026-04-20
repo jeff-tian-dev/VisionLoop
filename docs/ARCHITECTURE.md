@@ -225,7 +225,7 @@ One PNG per template name referenced in code (`attack.png`, `findmatch.png`, `ok
 | pyautogui | **Screen size only** (`Config.load_config`) |
 | customtkinter | GUI |
 | pyinstaller | Optional frozen builds |
-| keyboard | Not used by `app/`; used in `testing123.py` only |
+| keyboard | Listed in requirements; not imported by `app/` |
 
 ---
 
