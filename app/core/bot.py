@@ -60,6 +60,8 @@ class Bot:
                     self._check_stop()
                     self._run_loop(method, duration, upgrade_walls, star_bonus)
                     self._check_stop()
+                    self._multi_run_builder_base_after_session()
+                    self._check_stop()
             else:
                 self._run_loop(method, duration, upgrade_walls, star_bonus)
         except InterruptedError:
@@ -301,7 +303,10 @@ class Bot:
 
         ax, ay = self._wake_home_and_wait_for_attack(timeout=30)
         if not ax:
-            err = f"Multi-run: home not ready after loading {username!r} (attack.png timeout)"
+            err = (
+                f"Multi-run: Home Village not ready after loading {username!r} "
+                "(attack.png timeout after login / leaving Builder Base)"
+            )
             logger.error(err)
             if cb:
                 cb(err)
@@ -311,8 +316,9 @@ class Bot:
         self, timeout: int = 30
     ) -> Tuple[Optional[int], Optional[int]]:
         """
-        After switching accounts: same idea as session start — click bottom, scroll once, then
-        repeatedly click the empty / bottom area while scanning the lower half for attack.png.
+        After switching accounts: dismiss idle UI, then poll the bottom half for Home Village
+        ``attack.png``. If ``battack.png`` (Builder Base) is seen instead, leave via
+        :meth:`_leave_builder_base_with_nboat` and keep polling until ``attack.png`` appears.
         """
         empty_pt = self.config.get_point("empty")
         self.input.click(*empty_pt, pause=0.2)
@@ -330,10 +336,142 @@ class Bot:
                 ax, ay = self.vision.find_template(frame, "attack.png", region=roi)
                 if ax:
                     return ax, ay
+
+                bax, bay = self.vision.find_template(frame, "battack.png", region=roi)
+                if not bax:
+                    bax, bay = self.vision.find_template(frame, "battack.png")
+                if bax:
+                    logger.info(
+                        "Account loaded in Builder Base (battack.png); leaving to Home Village"
+                    )
+                    cb = getattr(self, "_status_callback", None)
+                    if cb:
+                        cb("Multi-run: Builder Base on login — leaving (nboat)")
+                    self._leave_builder_base_with_nboat(settle_before_drag=False)
+                    if self.stop_event.wait(1.0):
+                        return None, None
+                    continue
+
             self.input.click(*empty_pt, pause=0.15)
             if self.stop_event.wait(0.35):
                 return None, None
         return None, None
+
+    def _leave_builder_base_with_nboat(self, settle_before_drag: bool = True) -> None:
+        """
+        Pan down-left from screen center (~500px), then click ``nboat.png`` to return to Home Village.
+        Does not check ``battack.png`` first — call only when a BB→HV trip is intended.
+
+        ``settle_before_drag``: small delay after prior UI (e.g. collect clicks) before capturing
+        dimensions and dragging.
+        """
+        self._check_stop()
+
+        if settle_before_drag:
+            if self.stop_event.wait(0.75):
+                self._check_stop()
+
+        frame = self.window.screenshot()
+        if frame is None or frame.size == 0:
+            return
+
+        logger.info("Leaving Builder Base (drag + nboat)")
+        cb = getattr(self, "_status_callback", None)
+        if cb:
+            cb("Multi-run: leaving Builder Base (nboat)")
+
+        self._check_stop()
+        h, w = frame.shape[:2]
+        cx = w // 2 + random.randint(-25, 25)
+        cy = h // 2 + random.randint(-25, 25)
+        cx = max(8, min(w - 8, cx))
+        cy = max(8, min(h - 8, cy))
+
+        self.input.move(cx, cy, 0)
+        self.input.mouse_up(cx, cy)
+        if self.stop_event.wait(0.06):
+            self._check_stop()
+
+        step = 500
+        x2 = max(8, min(w - 8, cx - step))
+        y2 = max(8, min(h - 8, cy + step))
+
+        self.input.mouse_down(cx, cy)
+        self.input.human_move(cx, cy, x2, y2, duration=random.uniform(0.35, 0.55))
+        self.input.mouse_up(x2, y2)
+
+        if self.stop_event.wait(0.45):
+            self._check_stop()
+
+        nx, ny = self._wait_for_image("nboat.png", timeout=12, error=False)
+        if nx:
+            self.input.click(nx, ny, pause=0.25)
+        else:
+            logger.warning("nboat.png not found after Builder Base drag — may still be in Builder Base")
+
+    def _multi_run_collect_home_village_resources(self) -> None:
+        """Multi-run: tap Home Village collect bubbles if visible, before taking the boat to Builder Base."""
+        cb = getattr(self, "_status_callback", None)
+        logger.info("Multi-run: Home Village collect (hgold, helixir, hdelixir)")
+        if cb:
+            cb("Multi-run: Home Village collect")
+        for tpl in ("hgold.png", "helixir.png", "hdelixir.png"):
+            self._check_stop()
+            rx, ry = self._wait_for_image(
+                tpl, timeout=3, error=False, threshold=0.7
+            )
+            if rx:
+                self.input.click(rx, ry, pause=0.15)
+
+    def _multi_run_builder_base_after_session(self) -> None:
+        """
+        Multi-run only: after an account's farming session, collect Home Village resources if icons
+        appear, open the secondary base via boat, collect builder resources if icons appear,
+        optionally run the clock boost chain, then leave Builder Base.
+        """
+        self._multi_run_collect_home_village_resources()
+
+        cb = getattr(self, "_status_callback", None)
+        msg = "Multi-run: Builder Base (boat → collect)"
+        logger.info(msg)
+        if cb:
+            cb(msg)
+
+        bx, by = self._wait_for_image("boat.png", timeout=15, error=False)
+        if not bx:
+            logger.warning("Multi-run: boat.png not found — skipping Builder Base step")
+            return
+
+        self.input.click(bx, by, pause=0.2)
+        if self.stop_event.wait(1.0):
+            self._check_stop()
+
+        for tpl in ("bgold.png", "belixir.png", "bgem.png"):
+            self._check_stop()
+            rx, ry = self._wait_for_image(
+                tpl, timeout=3, error=False, threshold=0.7
+            )
+            if rx:
+                self.input.click(rx, ry, pause=0.15)
+
+        self._check_stop()
+        cx, cy = self._wait_for_image("bclock.png", timeout=2, error=False)
+        if cx:
+            self.input.click(cx, cy, pause=0.2)
+            if self.stop_event.wait(1.0):
+                self._check_stop()
+
+            cbx, cby = self._wait_for_image("clockboost.png", timeout=10, error=False)
+            if cbx:
+                self.input.click(cbx, cby, pause=0.2)
+            if self.stop_event.wait(1.0):
+                self._check_stop()
+
+            bux, buy = self._wait_for_image("boost.png", timeout=10, error=False)
+            if bux:
+                self.input.click(bux, buy, pause=0.15)
+
+        self._leave_builder_base_with_nboat(settle_before_drag=True)
 
     def _frame_shows_supercell_login_prompt(self, frame) -> bool:
         """True if OCR sees the Supercell ID login line (list scroll won't help)."""
@@ -476,6 +614,7 @@ class Bot:
         region: Optional[Tuple[int, int, int, int]] = None,
         y_anchor: Optional[int] = None,
         y_slop: int = 200,
+        threshold: float = 0.8,
     ) -> Tuple[Optional[int], Optional[int]]:
         start = time.time()
         while time.time() - start < timeout:
@@ -496,7 +635,9 @@ class Bot:
             else:
                 search_region = None
 
-            x, y = self.vision.find_template(frame, template, region=search_region)
+            x, y = self.vision.find_template(
+                frame, template, threshold=threshold, region=search_region
+            )
             if x:
                 return x, y
             if self.stop_event.wait(0.5):
