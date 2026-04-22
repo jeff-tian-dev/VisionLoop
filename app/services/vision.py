@@ -58,6 +58,13 @@ class VisionService:
         return (0, y0, w, h - y0)
 
     @staticmethod
+    def top_half_region(screen_img: np.ndarray) -> Tuple[int, int, int, int]:
+        """ROI (x, y, w, h) covering the top half of the screenshot."""
+        h, w = screen_img.shape[:2]
+        y1 = h // 2
+        return (0, 0, w, y1)
+
+    @staticmethod
     def right_half_region(screen_img: np.ndarray) -> Tuple[int, int, int, int]:
         """ROI (x, y, w, h) covering the right half of the screenshot."""
         h, w = screen_img.shape[:2]

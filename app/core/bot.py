@@ -256,10 +256,10 @@ class Bot:
                     return
                 continue
 
-            # No popup; if we see Attack button, we are home (bar is bottom half)
-            roi = VisionService.bottom_half_region(frame)
-            ax, ay = self.vision.find_template(frame, "attack.png", region=roi)
-            if ax:
+            # No popup; Home Village builder portrait (top half) means we're home
+            top_roi = VisionService.top_half_region(frame)
+            hx, hy = self.vision.find_template(frame, "builder.png", region=top_roi)
+            if hx:
                 return
 
             if self.stop_event.wait(1):
@@ -305,7 +305,7 @@ class Bot:
         if not ax:
             err = (
                 f"Multi-run: Home Village not ready after loading {username!r} "
-                "(attack.png timeout after login / leaving Builder Base)"
+                "(builder.png / attack.png timeout after login / leaving Builder Base)"
             )
             logger.error(err)
             if cb:
@@ -316,9 +316,11 @@ class Bot:
         self, timeout: int = 30
     ) -> Tuple[Optional[int], Optional[int]]:
         """
-        After switching accounts: dismiss idle UI, then poll the bottom half for Home Village
-        ``attack.png``. If ``battack.png`` (Builder Base) is seen instead, leave via
-        :meth:`_leave_builder_base_with_nboat` and keep polling until ``attack.png`` appears.
+        After switching accounts: dismiss idle UI, then poll the **top half** for village type
+        (``mbuilder.png`` = Builder Base, ``builder.png`` = Home Village). If Builder Base,
+        leave via :meth:`_leave_builder_base_with_nboat`. When Home Village is detected, return
+        ``attack.png`` coordinates from the **bottom half** (battle bar) once visible — same
+        template as :meth:`_find_match_and_attack` uses to start battles.
         """
         empty_pt = self.config.get_point("empty")
         self.input.click(*empty_pt, pause=0.2)
@@ -332,17 +334,13 @@ class Bot:
             self._check_stop()
             frame = self.window.screenshot()
             if frame is not None:
-                roi = VisionService.bottom_half_region(frame)
-                ax, ay = self.vision.find_template(frame, "attack.png", region=roi)
-                if ax:
-                    return ax, ay
-
-                bax, bay = self.vision.find_template(frame, "battack.png", region=roi)
-                if not bax:
-                    bax, bay = self.vision.find_template(frame, "battack.png")
-                if bax:
+                top_roi = VisionService.top_half_region(frame)
+                mx, my = self.vision.find_template(
+                    frame, "mbuilder.png", region=top_roi
+                )
+                if mx:
                     logger.info(
-                        "Account loaded in Builder Base (battack.png); leaving to Home Village"
+                        "Account loaded in Builder Base (mbuilder.png); leaving to Home Village"
                     )
                     cb = getattr(self, "_status_callback", None)
                     if cb:
@@ -352,6 +350,17 @@ class Bot:
                         return None, None
                     continue
 
+                hx, hy = self.vision.find_template(
+                    frame, "builder.png", region=top_roi
+                )
+                if hx:
+                    bot_roi = VisionService.bottom_half_region(frame)
+                    ax, ay = self.vision.find_template(
+                        frame, "attack.png", region=bot_roi
+                    )
+                    if ax:
+                        return ax, ay
+
             self.input.click(*empty_pt, pause=0.15)
             if self.stop_event.wait(0.35):
                 return None, None
@@ -360,7 +369,7 @@ class Bot:
     def _leave_builder_base_with_nboat(self, settle_before_drag: bool = True) -> None:
         """
         Pan down-left from screen center (~500px), then click ``nboat.png`` to return to Home Village.
-        Does not check ``battack.png`` first — call only when a BB→HV trip is intended.
+        Does not check ``mbuilder.png`` first — call only when a BB→HV trip is intended.
 
         ``settle_before_drag``: small delay after prior UI (e.g. collect clicks) before capturing
         dimensions and dragging.
