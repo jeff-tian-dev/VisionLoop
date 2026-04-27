@@ -111,7 +111,7 @@ Clash_Auto_Loot/
 ## Configuration
 
 - **`templates/data.json`** – Contains coordinate points and settings for 1920×1080 and 2560×1600 resolutions.
-- **`templates/*.png`** – Image templates used for UI detection (attack.png, findmatch.png, okay.png, etc.).
+- **`templates/*.png`** – Image templates used for UI detection (attack.png, farmbattle.png, okay.png, etc.).
 
 ## Disclaimer
 

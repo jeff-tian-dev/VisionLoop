@@ -142,7 +142,7 @@ The bot calls `find_window()` again at the **start of each run** so a closed/reo
 
 1. Optional **`_handle_walls`**: currently a **stub** (`pass`). The README mentions wall upgrades; the hook exists but no resource/bar logic is implemented yet.
 2. **`_find_match_and_attack`**:
-   - Wait for and click `attack.png` → `findmatch.png` → optionally `attack2.png`.
+   - Wait for and click `attack.png` → `farmbattle.png` → optionally `attack2.png`.
    - Wait for `find.png` (Next / search UI) up to 30s.
    - Grab one screenshot, build a **`TroopSpamStrategy`** from `method` (see below), call `strategy.execute`.
    - **`_wait_for_battle_end`**: Sneaky Goblins favor surrender; others wait for end battle, with fallbacks.
@@ -197,7 +197,7 @@ JSON **array of two objects**: index `0` = default (2560×1600 profile), index `
 
 ### `templates/*.png`
 
-One PNG per template name referenced in code (`attack.png`, `findmatch.png`, `okay.png`, troop/hero/spell icons, etc.). Captures must match **game scale and theme** for the configured resolution profile.
+One PNG per template name referenced in code (`attack.png`, `farmbattle.png`, `okay.png`, troop/hero/spell icons, etc.). Captures must match **game scale and theme** for the configured resolution profile.
 
 ### `get_resource_path` (`app/utils/common.py`)
 

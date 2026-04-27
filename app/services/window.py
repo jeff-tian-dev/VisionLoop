@@ -6,6 +6,11 @@ from PIL import Image
 from typing import Optional, Tuple
 from app.utils.logger import setup_logger
 
+GA_ROOT = 2
+SW_RESTORE = 9
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+
 logger = setup_logger("WindowService")
 
 # Windows API Constants
@@ -91,6 +96,53 @@ class WindowService:
 
         EnumWindows(EnumWindowsProc(enum_top_cb), 0)
         return result["hwnd"]
+
+    def _get_root_hwnd(self) -> int:
+        """Returns the top-level ancestor of the current hwnd."""
+        root = self.user32.GetAncestor(self.hwnd, GA_ROOT)
+        return root if root else self.hwnd
+
+    def fit_window(self, target_w: int = 2560, target_h: int = 1600) -> bool:
+        """
+        Resizes the top-level emulator window so the game render surface (CROSVM_1 child)
+        is exactly target_w x target_h pixels.
+
+        Measures the current margins between the outer window and the child at runtime, so
+        it works regardless of emulator toolbars, title bar height, or DPI.
+        Returns True on success, False if the window handle is missing.
+        """
+        if not self.hwnd:
+            logger.warning("fit_window: no window handle, skipping resize")
+            return False
+
+        root = self._get_root_hwnd()
+
+        # Restore from minimized/maximized so SetWindowPos takes effect
+        self.user32.ShowWindow(root, SW_RESTORE)
+
+        # Measure current rects in screen coordinates
+        child_rect = wintypes.RECT()
+        self.user32.GetWindowRect(self.hwnd, ctypes.byref(child_rect))
+
+        root_rect = wintypes.RECT()
+        self.user32.GetWindowRect(root, ctypes.byref(root_rect))
+
+        # Margins = space the emulator adds around the game surface (title bar, borders, toolbars)
+        margin_l = child_rect.left  - root_rect.left
+        margin_t = child_rect.top   - root_rect.top
+        margin_r = root_rect.right  - child_rect.right
+        margin_b = root_rect.bottom - child_rect.bottom
+
+        new_w = target_w + margin_l + margin_r
+        new_h = target_h + margin_t + margin_b
+
+        self.user32.SetWindowPos(root, 0, 0, 0, new_w, new_h, SWP_NOMOVE | SWP_NOZORDER)
+        logger.info(
+            f"fit_window: game surface → {target_w}x{target_h}, "
+            f"margins (l={margin_l} t={margin_t} r={margin_r} b={margin_b}), "
+            f"outer window → {new_w}x{new_h}"
+        )
+        return True
 
     def screenshot(self) -> Optional[np.ndarray]:
         """Captures a screenshot of the window."""

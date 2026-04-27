@@ -62,14 +62,18 @@ class AttackStrategy:
         
         deployed_heroes = []
 
-        # Deploy Log Launcher
+        # Deploy siege machine: Log Launcher or Siege Barracks (only one in the Army)
         roi = self.vision.bottom_half_region(frame)
-        lx, ly = self.vision.find_template(
+        ix, iy = self.vision.find_template(
             frame, "loglauncher.png", threshold=0.7, region=roi
         )
-        if lx:
+        if not ix:
+            ix, iy = self.vision.find_template(
+                frame, "siegebarracks.png", threshold=0.7, region=roi
+            )
+        if ix:
             deploy_point = self._get_hero_deploy_point()
-            self.input.click(lx, ly, pause=0.2, rand=False)
+            self.input.click(ix, iy, pause=0.2, rand=False)
             self.input.click(*deploy_point, pause=0.2)
 
         # Loop 1: Deploy Heroes

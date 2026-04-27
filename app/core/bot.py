@@ -32,12 +32,17 @@ class Bot:
         star_bonus: bool = False,
         status_callback=None,
         multi_run_players: Optional[List[PlayerEntry]] = None,
+        ranked_fill: bool = False,
     ):
         """Starts the bot loop. With ``multi_run_players``, runs a full session per enabled player."""
         self._status_callback = status_callback
         # Re-find window each time farming starts (hwnd changes when game is closed/reopened)
         if not self.window.find_window():
             raise RuntimeError("Clash of Clans window not found. Please ensure the game is open.")
+
+        # Force the game window to the expected size before any clicks or captures
+        self.window.fit_window()
+        time.sleep(0.5)  # Let the OS finish the resize before the first screenshot
 
         self.running = True
         self.stop_event.clear()
@@ -46,7 +51,7 @@ class Bot:
         mr = multi_run_players is not None
         logger.info(
             f"Bot started. Method: {method}, Time: {run_time_minutes}m, Walls: {upgrade_walls}, "
-            f"StarBonus: {star_bonus}, MultiRun: {mr}"
+            f"StarBonus: {star_bonus}, MultiRun: {mr}, RankedFill: {ranked_fill}"
         )
 
         try:
@@ -58,12 +63,12 @@ class Bot:
                     self._check_stop()
                     self._switch_account_and_load_home(player.name)
                     self._check_stop()
-                    self._run_loop(method, duration, upgrade_walls, star_bonus)
+                    self._run_loop(method, duration, upgrade_walls, star_bonus, ranked_fill)
                     self._check_stop()
                     self._multi_run_builder_base_after_session()
                     self._check_stop()
             else:
-                self._run_loop(method, duration, upgrade_walls, star_bonus)
+                self._run_loop(method, duration, upgrade_walls, star_bonus, ranked_fill)
         except InterruptedError:
             pass
         except Exception as e:
@@ -82,7 +87,14 @@ class Bot:
         if self.stop_event.is_set():
             raise InterruptedError("Bot stopped by user")
 
-    def _run_loop(self, method_id: int, duration_seconds: int, upgrade_walls: bool, star_bonus: bool = False):
+    def _run_loop(
+        self,
+        method_id: int,
+        duration_seconds: int,
+        upgrade_walls: bool,
+        star_bonus: bool = False,
+        ranked_fill: bool = False,
+    ):
         start_time = time.time()
 
         # Initial setup
@@ -110,7 +122,7 @@ class Bot:
                 self._handle_walls()
 
             # Start Attack
-            troop_failed = self._find_match_and_attack(method_id)
+            troop_failed = self._find_match_and_attack(method_id, ranked_fill)
 
             # Return Home (clicks Okay, then Return Home)
             self._return_home()
@@ -132,16 +144,25 @@ class Bot:
                 logger.info("Star bonus claimed (star icons no longer visible). Stopping.")
                 break
 
-    def _find_match_and_attack(self, method_id: int) -> bool:
-        """Returns True if troop was not found (bot should stop)."""
+    def _find_match_and_attack(self, method_id: int, ranked_fill: bool = False) -> bool:
+        """Returns True if the bot should stop (troop not found, or ranked limit reached)."""
         # Click Attack
         ax, ay = self._wait_for_image("attack.png")
         if not ax: return False
         self.input.click(ax, ay, pause=0.1)
 
-        # Click Find Match
-        fx, fy = self._wait_for_image("findmatch.png")
-        if not fx: return False
+        # Farm Battle vs Ranked (Find a Match)
+        battle_template = "rankedbattle.png" if ranked_fill else "farmbattle.png"
+        fx, fy = self._wait_for_image(battle_template)
+        if not fx:
+            if ranked_fill:
+                msg = "Ranked battle button not found — daily limit may be reached. Stopping."
+                logger.info(msg)
+                cb = getattr(self, "_status_callback", None)
+                if cb:
+                    cb(msg)
+                return True
+            return False
         self.input.click(fx, fy, pause=0.1)
 
         # Valkyrie: verify army / load recipe before confirming attack (attack2.png)
@@ -152,10 +173,15 @@ class Bot:
         a2x, a2y = self._wait_for_image("attack2.png")  # Sometimes needed
         if a2x:
             self.input.click(a2x, a2y, pause=0.1)
+            if ranked_fill:
+                rx, ry = self._wait_for_image("rankedattackconfirm.png", timeout=10)
+                if not rx:
+                    logger.warning("rankedattackconfirm.png not found after attack2.png")
+                else:
+                    self.input.click(rx, ry, pause=0.1)
 
-        # Wait for "Find" screen (clouds) to disappear -> Base found
-        # Actually logic is: wait until "find.png" (Next button) is visible
-        self._wait_for_image("find.png", timeout=30)
+        # Base loaded: in-battle bar shows Surrender or End Battle (never both)
+        self._wait_for_any_image(("surrender.png", "endbattle.png"), timeout=30)
 
         # Base is visible: move cursor to center and nudge view (short wheel) before deploying
         frame = self.window.screenshot()
@@ -426,9 +452,7 @@ class Bot:
             cb("Multi-run: Home Village collect")
         for tpl in ("hgold.png", "helixir.png", "hdelixir.png"):
             self._check_stop()
-            rx, ry = self._wait_for_image(
-                tpl, timeout=3, error=False, threshold=0.7
-            )
+            rx, ry = self._find_template_once(tpl, threshold=0.7)
             if rx:
                 self.input.click(rx, ry, pause=0.15)
 
@@ -457,9 +481,7 @@ class Bot:
 
         for tpl in ("bgold.png", "belixir.png", "bgem.png"):
             self._check_stop()
-            rx, ry = self._wait_for_image(
-                tpl, timeout=3, error=False, threshold=0.7
-            )
+            rx, ry = self._find_template_once(tpl, threshold=0.7)
             if rx:
                 self.input.click(rx, ry, pause=0.15)
 
@@ -615,6 +637,74 @@ class Bot:
             return False
         return True
 
+    def _search_region_for_template(
+        self,
+        frame,
+        template: str,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        y_anchor: Optional[int] = None,
+        y_slop: int = 200,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if region is not None:
+            return region
+        if y_anchor is not None:
+            h, w = frame.shape[:2]
+            y0 = max(0, y_anchor - y_slop)
+            y1 = min(h, y_anchor + y_slop)
+            return (0, y0, w, y1 - y0)
+        if template in BOTTOM_HALF_BOT_TEMPLATES:
+            return VisionService.bottom_half_region(frame)
+        return None
+
+    def _find_template_once(
+        self,
+        template: str,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        y_anchor: Optional[int] = None,
+        y_slop: int = 200,
+        threshold: float = 0.8,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """One screenshot; match template or return (None, None). No polling."""
+        self._check_stop()
+        frame = self.window.screenshot()
+        if frame is None:
+            return None, None
+        search_region = self._search_region_for_template(
+            frame, template, region, y_anchor, y_slop
+        )
+        return self.vision.find_template(
+            frame, template, threshold=threshold, region=search_region
+        )
+
+    def _wait_for_any_image(
+        self,
+        templates: Tuple[str, ...],
+        timeout: int = 10,
+        error: bool = True,
+        threshold: float = 0.8,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """First match among `templates` wins (same frame); order only matters if both match."""
+        start = time.time()
+        while time.time() - start < timeout:
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                continue
+            for template in templates:
+                search_region = self._search_region_for_template(
+                    frame, template, None, None, 200
+                )
+                x, y = self.vision.find_template(
+                    frame, template, threshold=threshold, region=search_region
+                )
+                if x:
+                    return x, y
+            if self.stop_event.wait(0.5):
+                return None, None
+        if error:
+            logger.warning(f"Timeout waiting for any of {templates}")
+        return None, None
+
     def _wait_for_image(
         self,
         template: str,
@@ -632,18 +722,9 @@ class Bot:
             if frame is None:
                 continue
 
-            if region is not None:
-                search_region = region
-            elif y_anchor is not None:
-                h, w = frame.shape[:2]
-                y0 = max(0, y_anchor - y_slop)
-                y1 = min(h, y_anchor + y_slop)
-                search_region = (0, y0, w, y1 - y0)
-            elif template in BOTTOM_HALF_BOT_TEMPLATES:
-                search_region = VisionService.bottom_half_region(frame)
-            else:
-                search_region = None
-
+            search_region = self._search_region_for_template(
+                frame, template, region, y_anchor, y_slop
+            )
             x, y = self.vision.find_template(
                 frame, template, threshold=threshold, region=search_region
             )

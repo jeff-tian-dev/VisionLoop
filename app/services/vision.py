@@ -38,9 +38,10 @@ class OcrWordBox:
 BOTTOM_HALF_BOT_TEMPLATES = frozenset(
     {
         "attack.png",
-        "findmatch.png",
+        "farmbattle.png",
+        "rankedbattle.png",
         "attack2.png",
-        "find.png",
+        "rankedattackconfirm.png",
         "surrender.png",
         "endbattle.png",
     }

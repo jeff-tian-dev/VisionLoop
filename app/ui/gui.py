@@ -179,6 +179,116 @@ class PlayerListDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class RankedAttackConfirmDialog(ctk.CTkToplevel):
+    """Modal confirm for ranked attack fill; Yes stays disabled for 5 seconds."""
+
+    def __init__(self, master, minutes: int):
+        super().__init__(master)
+        self._parent = master
+        self._result = False
+        self._after_id: Any = None
+        self.title("Ranked attack fill")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        msg = (
+            f"The bot will use up your ranked attacks up to {minutes} minutes, "
+            "are you sure you want to continue?"
+        )
+        ctk.CTkLabel(
+            self,
+            text=msg,
+            font=ctk.CTkFont(size=13),
+            text_color=("gray10", "gray90"),
+            wraplength=400,
+            justify="left",
+        ).pack(anchor="w", padx=PAD, pady=(PAD, 8))
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=PAD, pady=(0, PAD))
+
+        self._remaining = 5
+        self._btn_yes = ctk.CTkButton(
+            row,
+            text="Yes (5)",
+            width=100,
+            height=32,
+            state="disabled",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=DANGER,
+            hover_color=DANGER_HOVER,
+            command=self._on_yes,
+        )
+        self._btn_yes.pack(side="right", padx=(8, 0))
+        ctk.CTkButton(
+            row,
+            text="No",
+            width=100,
+            height=32,
+            font=ctk.CTkFont(size=13),
+            fg_color=("gray50", "gray40"),
+            hover_color=("gray40", "gray30"),
+            command=self._on_no,
+        ).pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_no)
+        self._after_id = self.after(0, self._tick_countdown)
+        self.after(10, self._place_over_parent)
+
+    def _place_over_parent(self) -> None:
+        """Center the dialog on the main bot window (not the top-left of the screen)."""
+        if not self.winfo_exists():
+            return
+        parent = self._parent
+        self.update_idletasks()
+        parent.update_idletasks()
+        w = self.winfo_width() or self.winfo_reqwidth()
+        h = self.winfo_height() or self.winfo_reqheight()
+        pw = max(parent.winfo_width(), parent.winfo_reqwidth())
+        ph = max(parent.winfo_height(), parent.winfo_reqheight())
+        x = int(parent.winfo_rootx() + (pw - w) // 2)
+        y = int(parent.winfo_rooty() + (ph - h) // 2)
+        self.geometry(f"+{x}+{y}")
+        self.lift(parent)
+        self.focus()
+
+    def _cancel_after(self) -> None:
+        if self._after_id is not None:
+            self.after_cancel(self._after_id)
+            self._after_id = None
+
+    def _tick_countdown(self) -> None:
+        self._after_id = None
+        if not self.winfo_exists():
+            return
+        if self._remaining > 0:
+            self._btn_yes.configure(text=f"Yes ({self._remaining})", state="disabled")
+            self._remaining -= 1
+            self._after_id = self.after(1000, self._tick_countdown)
+        else:
+            self._btn_yes.configure(text="Yes", state="normal")
+
+    def _on_yes(self) -> None:
+        self._result = True
+        self._cancel_after()
+        self.grab_release()
+        self.destroy()
+
+    def _on_no(self) -> None:
+        self._result = False
+        self._cancel_after()
+        if self.winfo_exists():
+            self.grab_release()
+            self.destroy()
+
+    @staticmethod
+    def ask(master, minutes: int) -> bool:
+        d = RankedAttackConfirmDialog(master, minutes)
+        master.wait_window(d)
+        return d._result
+
+
 class AutoLootApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -274,6 +384,20 @@ class AutoLootApp(ctk.CTk):
             command=self._on_star_bonus_toggle,
         )
         self.star_bonus_switch.grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+        self.ranked_attack_switch = ctk.CTkSwitch(
+            opt_row,
+            text="Ranked attack fill",
+            font=ctk.CTkFont(size=13),
+            onvalue=True,
+            offvalue=False,
+            text_color=DANGER,
+            fg_color=("#3f3f46", "#27272a"),
+            progress_color=DANGER,
+            button_color=("#f87171", "#ef4444"),
+            button_hover_color=DANGER_HOVER,
+        )
+        self.ranked_attack_switch.grid(row=2, column=0, sticky="w", pady=(8, 0))
 
         # Timer section (greyed out when Star Bonus is on)
         self.timer_frame = ctk.CTkFrame(card_options, fg_color="transparent")
@@ -470,6 +594,16 @@ class AutoLootApp(ctk.CTk):
             )
             return
 
+        if not self.star_bonus_switch.get():
+            mins = self._get_minutes()
+            if mins <= 0 or mins > 999:
+                messagebox.showerror("Error", "Invalid time duration. Enter 1-999 minutes.")
+                return
+        if self.ranked_attack_switch.get():
+            x = self._get_minutes()
+            if not RankedAttackConfirmDialog.ask(self, x):
+                return
+
         if self.star_bonus_switch.get():
             self.btn_start.configure(state="disabled")
             self.btn_stop.configure(state="normal")
@@ -484,9 +618,6 @@ class AutoLootApp(ctk.CTk):
             self.bot_thread.start()
         else:
             mins = self._get_minutes()
-            if mins <= 0 or mins > 999:
-                messagebox.showerror("Error", "Invalid time duration. Enter 1-999 minutes.")
-                return
 
             self.btn_start.configure(state="disabled")
             self.btn_stop.configure(state="normal")
@@ -511,6 +642,7 @@ class AutoLootApp(ctk.CTk):
                 star_bonus=True,
                 status_callback=on_status,
                 multi_run_players=multi_run_players,
+                ranked_fill=self.ranked_attack_switch.get(),
             )
             error_msg = None
         except Exception as e:
@@ -527,6 +659,7 @@ class AutoLootApp(ctk.CTk):
                 walls,
                 status_callback=on_status,
                 multi_run_players=multi_run_players,
+                ranked_fill=self.ranked_attack_switch.get(),
             )
             error_msg = None
         except Exception as e:
