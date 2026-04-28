@@ -2,79 +2,57 @@
 
 A Windows automation bot for Clash of Clans that farms resources using image recognition. The bot automates the attack loop: find a match, deploy troops, return home, and repeat.
 
-![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
+![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-## Features
+## HOW TO USE
 
-- **Multiple attack strategies** – Valkyries, Sneaky Goblins, Super Minions
-- **Star Bonus mode** – Automatically stops when the daily star bonus is claimed
-- **Configurable duration** – Run for a set number of minutes or use quick presets (5m, 10m, 20m)
-- **Responsive Stop** – Stops within seconds when you click Stop, even during troop deployment
-- **Window handle recovery** – Re-finds the game window each session, so you can close and reopen the game without restarting the bot
+### Install
 
-## Requirements
+1. Open **[Releases](https://github.com/jeff-tian-dev/VisionLoop/releases)** for this project.
+2. Download the latest **`ClashAutoLoot.exe`** (or the main Windows build attached there).
+3. Save it somewhere you’re happy to run it from (Desktop or a folder is fine). You can run it as-is; no Python install needed.
 
-- **Windows** (uses Windows API for window capture and input)
-- **Clash of Clans** running on PC (e.g. Google Play Games, BlueStacks, or similar)
-- **Python 3.8+**
-- **Supported resolutions** – 1920×1080 or 2560×1600 (default profile)
+### Before you run it
 
-## Installation
+- Use **Windows**.
+- Play **Clash of Clans on PC** (for example Google Play Games).
+- Run the game in a **normal widescreen window**—either a standard 16:9 shape or a slightly taller 16:10-style layout. Don’t use a random or extreme crop; if the shape isn’t supported, the app may close right after opening with a short message.
+- If the game window isn’t open yet, the app can still start—just open Clash before you press **Start** on the bot.
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/jeff-tian-dev/game-automation-framework.git
-   cd game-automation-framework
-   ```
+### Using the app
 
-2. Create a virtual environment (recommended):
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate
-   ```
+1. Open **Clash of Clans** and leave the window visible.
+2. Double-click **`ClashAutoLoot`** to open it.
+3. Pick how you want to attack: **Valkyries**, **Sneaky Goblins**, or **Super Minions**.
+4. **Multi-run** (optional): turn it on, then **Player list…** to add the account names you see in-game, choose who runs and who is skipped, and put them in the order you want. At least one account must be set to run.
+5. **Ranked attack fill** (optional): only turn this on if you **want** to spend ranked attacks; you’ll get a confirmation screen first.
+6. Either type **how many minutes** to farm (or use the quick **5m / 10m / 20m** buttons), or turn on **Star Bonus** to farm until your daily star bonus is done (the timer is turned off in that mode).
+7. Click **Start** when you’re ready. Use **Stop** anytime—it should stop within a few seconds. You may also see **Start/Stop** on the **taskbar preview** when you hover the app.
 
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+### Star Bonus
 
-4. Ensure the `templates` folder contains all required image templates and `data.json` for your resolution.
+With **Star Bonus** on, the bot keeps going until it no longer sees the “you still have a bonus to earn” stars on your home screen, then it stops on its own.
 
-## Usage
+### Multi-run
 
-1. Open Clash of Clans on your PC.
-2. Run the application:
-   ```bash
-   python -m app.main
-   ```
-3. Select an attack method (Valkyries, Sneaky Goblins, or Super Minions).
-4. Choose duration or enable **Star Bonus** to run until the daily star bonus is claimed.
-5. Click **Start** to begin farming.
+The app saves your player list as **`player_list.json`** in the **same folder** as **`ClashAutoLoot.exe`**. Order matters: that’s the order it visits accounts. **Skip** means it won’t farm that account this round.
 
-### Star Bonus Mode
+### Ranked attack fill
 
-When **Star Bonus** is enabled, the bot runs until the empty star icon is no longer visible on the home screen, indicating the star bonus has been claimed. The duration field is disabled in this mode.
+This uses **ranked** battles instead of regular farming. Only enable it if you’re okay using up ranked attacks during your run.
 
-### Building an Executable
+## For developers
 
-Tesseract OCR is bundled into the `.exe` when you use the spec file (Windows). First copy your Tesseract install into `build_assets/tesseract` (ignored by git):
+Clone the repo, use Python 3.9+, `pip install -r requirements.txt`, and run `python -m app.main`. To build your own `.exe`, see [`build_assets/README.md`](build_assets/README.md) and `ClashAutoLoot.spec` (PyInstaller).
 
 ```bash
-python scripts/prepare_tesseract_bundle.py
+python scripts/prepare_tesseract_bundle.py   # optional, if you have this helper
 python -m PyInstaller --noconfirm ClashAutoLoot.spec
 ```
 
-The frozen app resolves `tesseract.exe` and `tessdata` from the PyInstaller temp folder automatically (`app.utils.tesseract_env`).
-
-**Without the bundle step**, the spec still builds, but OCR features will only work if Tesseract is installed on the target PC or you set the `TESSERACT_CMD` environment variable.
-
-**One-liner without the spec** (no bundled Tesseract; templates only):
-
-```bash
-python -m PyInstaller --noconfirm --onefile --windowed --name "ClashAutoLoot" --add-data "templates;templates" --paths "." --hidden-import "app" --hidden-import "app.ui" --hidden-import "app.core" --hidden-import "app.services" --hidden-import "app.utils" --hidden-import "pytesseract" "app/main.py"
-```
+Without bundling Tesseract into `build_assets/tesseract`, multi-run OCR in a custom build may need Tesseract installed on the machine or a `TESSERACT_CMD` environment variable.
 
 ## Project Structure
 
@@ -82,20 +60,25 @@ python -m PyInstaller --noconfirm --onefile --windowed --name "ClashAutoLoot" --
 Clash_Auto_Loot/
 ├── app/
 │   ├── core/
-│   │   ├── bot.py          # Main bot logic and attack loop
-│   │   └── strategies.py   # Attack strategies (troop deployment)
+│   │   ├── bot.py           # Main bot logic and attack loop
+│   │   └── strategies.py    # Attack strategies (troop deployment)
 │   ├── services/
-│   │   ├── input.py        # Mouse/keyboard injection
-│   │   ├── vision.py       # Image template matching
-│   │   └── window.py       # Window detection and screenshots
+│   │   ├── input.py         # Mouse/keyboard injection (SendMessage, clamped to capture)
+│   │   ├── vision.py        # Template matching and OCR helpers
+│   │   ├── window.py        # Window detection and screenshots
+│   │   └── taskbar_thumb.py # Windows taskbar preview Start/Stop
 │   ├── ui/
-│   │   └── gui.py          # CustomTkinter interface
+│   │   └── gui.py           # CustomTkinter interface
 │   ├── utils/
-│   │   ├── common.py       # Resource paths
-│   │   └── logger.py       # Logging configuration
-│   ├── config.py           # Resolution-based config
-│   └── main.py             # Entry point
-├── templates/               # Image templates and data.json
+│   │   ├── common.py        # Resource paths, per-aspect template paths
+│   │   ├── logger.py        # Logging configuration
+│   │   ├── player_list_store.py  # Multi-run player list JSON
+│   │   └── tesseract_env.py # Tesseract path for dev and frozen builds
+│   ├── config.py            # Aspect selection, scaling, data.json loading
+│   └── main.py              # Entry point (Tesseract + GUI)
+├── templates/
+│   ├── 16_9/                # 16:9 pack (ref 2560×1440)
+│   └── 16_10/               # 16:10 pack (ref 2560×1600)
 ├── requirements.txt
 └── README.md
 ```
@@ -103,14 +86,16 @@ Clash_Auto_Loot/
 ## How It Works
 
 1. **Window detection** – Finds the Clash of Clans window using the Windows API (supports Google Play Games / CROSVM).
-2. **Image recognition** – Uses OpenCV template matching to locate UI elements (Attack button, Find Match, Okay, etc.).
-3. **Input injection** – Sends mouse clicks and movements directly to the game window via `SendMessage`.
-4. **Attack strategies** – Deploys troops along configurable paths (corners) with human-like movement timing.
+2. **Aspect and scaling** – Chooses `16_9` vs `16_10` from the outer window size, loads `templates/<aspect>/data.json`, and scales authored coordinates to the current capture size.
+3. **Image recognition** – Uses OpenCV template matching to locate UI elements (Attack, Find Match, Okay, ranked vs farm battle, etc.).
+4. **OCR** – Tesseract is used to match player names when switching accounts in multi-run.
+5. **Input injection** – Sends mouse clicks and movements to the game window via `SendMessage`, with coordinates clamped to the captured window rectangle.
+6. **Attack strategies** – Deploys troops along configurable paths (corners) with human-like movement timing.
 
 ## Configuration
 
-- **`templates/data.json`** – Contains coordinate points and settings for 1920×1080 and 2560×1600 resolutions.
-- **`templates/*.png`** – Image templates used for UI detection (attack.png, farmbattle.png, okay.png, etc.).
+- **`templates/16_9/data.json`** and **`templates/16_10/data.json`** – Coordinates and settings at the reference resolutions above.
+- **`templates/<aspect>/*.png`** – Image templates for that aspect (attack, farmbattle, ranked battle, emptystar, changeuser, etc.).
 
 ## Disclaimer
 
