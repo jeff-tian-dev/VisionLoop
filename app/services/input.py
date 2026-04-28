@@ -2,6 +2,8 @@ import ctypes
 import time
 import random
 import math
+from typing import Tuple
+
 from app.services.window import WindowService, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, MK_LBUTTON, WM_MOUSEWHEEL, WHEEL_DELTA
 from app.utils.logger import setup_logger
 
@@ -15,8 +17,24 @@ class InputService:
         self.stop_event = stop_event
         self.user32 = ctypes.windll.user32
 
+    def _clamp_to_capture(self, x: int, y: int) -> Tuple[int, int]:
+        """
+        Clamp client-style coordinates into the current captured window rectangle
+        (:meth:`WindowService.get_outer_pixel_size`, same outer size as screenshots).
+        """
+        sz = self.window_service.get_outer_pixel_size()
+        if not sz:
+            return int(x), int(y)
+        w, h = sz
+        if w <= 1 or h <= 1:
+            return int(x), int(y)
+        cx = max(0, min(w - 1, int(x)))
+        cy = max(0, min(h - 1, int(y)))
+        return cx, cy
+
     def _make_lparam(self, x: int, y: int) -> int:
-        return (y << 16) | (x & 0xFFFF)
+        xc, yc = self._clamp_to_capture(x, y)
+        return (yc << 16) | (xc & 0xFFFF)
 
     def click(self, x: int, y: int, pause: float = 1.0, rand: bool = True):
         """Performs a click with optional randomization and delay."""
