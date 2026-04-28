@@ -29,7 +29,7 @@ A Windows automation bot for Clash of Clans that farms resources using image rec
 4. **Multi-run** (optional): turn it on, then **Player list…** to add the account names you see in-game, choose who runs and who is skipped, and put them in the order you want. At least one account must be set to run.
 5. **Ranked attack fill** (optional): only turn this on if you **want** to spend ranked attacks; you’ll get a confirmation screen first.
 6. Either type **how many minutes** to farm (or use the quick **5m / 10m / 20m** buttons), or turn on **Star Bonus** to farm until your daily star bonus is done (the timer is turned off in that mode).
-7. Click **Start** when you’re ready. Use **Stop** anytime—it should stop within a few seconds. You may also see **Start/Stop** on the **taskbar preview** when you hover the app.
+7. Click **Start** when you’re ready. Use **Stop** anytime—it should stop within a few seconds. You may also see **Start/Stop** on the **taskbar preview** when you hover the app. You may tab out of the game at this point.
 
 ### Star Bonus
 
