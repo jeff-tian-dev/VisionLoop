@@ -28,7 +28,6 @@ class Bot:
         self,
         method: int,
         run_time_minutes: int,
-        upgrade_walls: bool,
         star_bonus: bool = False,
         status_callback=None,
         multi_run_players: Optional[List[PlayerEntry]] = None,
@@ -40,17 +39,13 @@ class Bot:
         if not self.window.find_window():
             raise RuntimeError("Clash of Clans window not found. Please ensure the game is open.")
 
-        # Force the game window to the expected size before any clicks or captures
-        self.window.fit_window()
-        time.sleep(0.5)  # Let the OS finish the resize before the first screenshot
-
         self.running = True
         self.stop_event.clear()
 
         duration = 900 if star_bonus else run_time_minutes * 60  # 15 min hard cap for star bonus
         mr = multi_run_players is not None
         logger.info(
-            f"Bot started. Method: {method}, Time: {run_time_minutes}m, Walls: {upgrade_walls}, "
+            f"Bot started. Method: {method}, Time: {run_time_minutes}m, "
             f"StarBonus: {star_bonus}, MultiRun: {mr}, RankedFill: {ranked_fill}"
         )
 
@@ -63,12 +58,12 @@ class Bot:
                     self._check_stop()
                     self._switch_account_and_load_home(player.name)
                     self._check_stop()
-                    self._run_loop(method, duration, upgrade_walls, star_bonus, ranked_fill)
+                    self._run_loop(method, duration, star_bonus, ranked_fill)
                     self._check_stop()
                     self._multi_run_builder_base_after_session()
                     self._check_stop()
             else:
-                self._run_loop(method, duration, upgrade_walls, star_bonus, ranked_fill)
+                self._run_loop(method, duration, star_bonus, ranked_fill)
         except InterruptedError:
             pass
         except Exception as e:
@@ -87,11 +82,19 @@ class Bot:
         if self.stop_event.is_set():
             raise InterruptedError("Bot stopped by user")
 
+    def _update_config_size(self, frame) -> None:
+        """Reload aspect profile if screenshot size implies a different template folder."""
+        self.config.set_target_size_from_frame(frame)
+
+    def _scroll_point(self) -> Tuple[int, int]:
+        """Scroll anchor in authoring space [1000,1000]; scaled to current capture."""
+        x, y = self.config.scale_point([1000, 1000])
+        return x, y
+
     def _run_loop(
         self,
         method_id: int,
         duration_seconds: int,
-        upgrade_walls: bool,
         star_bonus: bool = False,
         ranked_fill: bool = False,
     ):
@@ -100,10 +103,12 @@ class Bot:
         # Initial setup
         if self.stop_event.wait(1):
             return
+        frame = self.window.screenshot()
+        self._update_config_size(frame)
         empty_pt = self.config.get_point("empty")
         self.input.click(*empty_pt, pause=0.2)
 
-        self.input.scroll(1000, 1000, 20)
+        self.input.scroll(*self._scroll_point(), 20)
         delay = random.uniform(0.1, 0.3)
         if self.stop_event.wait(delay):
             return
@@ -117,9 +122,6 @@ class Bot:
 
         while time.time() - start_time < duration_seconds:
             self._check_stop()
-
-            if upgrade_walls:
-                self._handle_walls()
 
             # Start Attack
             troop_failed = self._find_match_and_attack(method_id, ranked_fill)
@@ -135,7 +137,7 @@ class Bot:
                 break
 
             # Scroll down/out a bit now that we're on home
-            self.input.scroll(1000, 1000, 5)
+            self.input.scroll(*self._scroll_point(), 5)
             if self.stop_event.wait(random.uniform(0.15, 0.25)):
                 return
 
@@ -187,6 +189,7 @@ class Bot:
         frame = self.window.screenshot()
         if frame is None:
             return False
+        self._update_config_size(frame)
         h, w = frame.shape[:2]
         cx, cy = w // 2, h // 2
         self.input.move(cx, cy)
@@ -198,6 +201,7 @@ class Bot:
         frame = self.window.screenshot()
         if frame is None:
             return False
+        self._update_config_size(frame)
 
         strategy = self._get_strategy(method_id)
         result = strategy.execute(frame, self.stop_event)
@@ -256,6 +260,7 @@ class Bot:
         frame = self.window.screenshot()
         if frame is None:
             return False
+        self._update_config_size(frame)
         for template in ("emptystar.png", "glowstar.png"):
             _, _, confidence = self.vision.find_template_with_confidence(
                 frame, template, threshold=0.0
@@ -273,6 +278,7 @@ class Bot:
                 if self.stop_event.wait(1):
                     return
                 continue
+            self._update_config_size(frame)
 
             # Check Okay first - dismiss any popup before we consider ourselves home
             ox, oy = self.vision.find_template(frame, "okay.png")
@@ -348,9 +354,11 @@ class Bot:
         ``attack.png`` coordinates from the **bottom half** (battle bar) once visible — same
         template as :meth:`_find_match_and_attack` uses to start battles.
         """
+        frame = self.window.screenshot()
+        self._update_config_size(frame)
         empty_pt = self.config.get_point("empty")
         self.input.click(*empty_pt, pause=0.2)
-        self.input.scroll(1000, 1000, 20)
+        self.input.scroll(*self._scroll_point(), 20)
         delay = random.uniform(0.1, 0.3)
         if self.stop_event.wait(delay):
             return None, None
@@ -360,6 +368,7 @@ class Bot:
             self._check_stop()
             frame = self.window.screenshot()
             if frame is not None:
+                self._update_config_size(frame)
                 top_roi = VisionService.top_half_region(frame)
                 mx, my = self.vision.find_template(
                     frame, "mbuilder.png", region=top_roi
@@ -409,6 +418,7 @@ class Bot:
         frame = self.window.screenshot()
         if frame is None or frame.size == 0:
             return
+        self._update_config_size(frame)
 
         logger.info("Leaving Builder Base (drag + nboat)")
         cb = getattr(self, "_status_callback", None)
@@ -559,6 +569,7 @@ class Bot:
                 if self.stop_event.wait(0.5):
                     return None, None
                 continue
+            self._update_config_size(frame)
             roi = region if region is not None else VisionService.right_half_region(frame)
             x, y = self.vision.find_word_on_screen(frame, text, region=roi, **ocr_kwargs)
             if x:
@@ -597,6 +608,7 @@ class Bot:
                 if self.stop_event.wait(0.5):
                     return None, None
                 continue
+            self._update_config_size(frame)
             x, y = self.vision.find_word_on_screen(frame, text, region=region, **ocr_kwargs)
             if x:
                 return x, y
@@ -669,6 +681,7 @@ class Bot:
         frame = self.window.screenshot()
         if frame is None:
             return None, None
+        self._update_config_size(frame)
         search_region = self._search_region_for_template(
             frame, template, region, y_anchor, y_slop
         )
@@ -690,6 +703,7 @@ class Bot:
             frame = self.window.screenshot()
             if frame is None:
                 continue
+            self._update_config_size(frame)
             for template in templates:
                 search_region = self._search_region_for_template(
                     frame, template, None, None, 200
@@ -721,6 +735,7 @@ class Bot:
             frame = self.window.screenshot()
             if frame is None:
                 continue
+            self._update_config_size(frame)
 
             search_region = self._search_region_for_template(
                 frame, template, region, y_anchor, y_slop
@@ -736,14 +751,3 @@ class Bot:
         if error:
             logger.warning(f"Timeout waiting for {template}")
         return None, None
-
-    def _handle_walls(self):
-        # Simplified wall logic placeholder - full logic was very complex and specific
-        # Implementing basic check to see if resources are full
-        frame = self.window.screenshot()
-        if frame is None: return
-        
-        # Check resources (Gold/Elixir)
-        # This requires precise pixel checking from original code
-        # For now, we skip complex wall logic to ensure core stability first
-        pass

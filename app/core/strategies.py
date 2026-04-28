@@ -1,11 +1,12 @@
 import math
 import time
 import random
-from typing import List, Tuple
+from typing import Any, List, Optional, Tuple
+
 from app.services.input import InputService
 from app.services.vision import VisionService
 from app.services.window import WindowService
-from app.config import Config
+from app.config import ASPECT_16_9, Config
 from app.utils.logger import setup_logger
 
 logger = setup_logger("Strategies")
@@ -18,7 +19,6 @@ class AttackStrategy:
         self.vision = vision_service
         self.config = config
         self.stop_event = stop_event
-        self.data = config.data
         self.CORNER_ORDER = ["left", "top", "right", "bottom"]
 
     def execute(self, frame, stop_event=None):
@@ -30,6 +30,15 @@ class AttackStrategy:
 
     def _expand_loc(self, x: int, y: int) -> Tuple[int, int]:
         return x + random.randint(-10, 10), y + random.randint(-10, 10)
+
+    def _sync_frame_size(self, frame) -> None:
+        self.config.set_target_size_from_frame(frame)
+
+    def _point(self, key: str) -> List[int]:
+        return self.config.get_point(key)
+
+    def _scaled_deployment_data(self) -> dict:
+        return {key: self._point(key) for key in self.CORNER_ORDER}
 
     def _corner_helper(self, current: str, direction: int) -> str:
         idx = self.CORNER_ORDER.index(current)
@@ -43,9 +52,9 @@ class AttackStrategy:
         if iteration == 4:
             return
         
-        current_pos = self.data[corner]
+        current_pos = self._point(corner)
         next_corner = self._corner_helper(corner, direction)
-        target = self.data[next_corner]
+        target = self._point(next_corner)
         
         # Move from current corner to next corner
         x1, y1 = self._expand_loc(*current_pos)
@@ -57,6 +66,7 @@ class AttackStrategy:
         self._troop_spam_helper(next_corner, direction, iteration + 1, duration)
 
     def deploy_heroes(self, frame):
+        self._sync_frame_size(frame)
         heroes = ["queen", "warden", "RC", "king", "prince", "dragonduke"]
         random.shuffle(heroes)
         
@@ -72,7 +82,7 @@ class AttackStrategy:
                 frame, "siegebarracks.png", threshold=0.7, region=roi
             )
         if ix:
-            deploy_point = self._get_hero_deploy_point()
+            deploy_point = self._get_hero_deploy_point(frame)
             self.input.click(ix, iy, pause=0.2, rand=False)
             self.input.click(*deploy_point, pause=0.2)
 
@@ -85,7 +95,7 @@ class AttackStrategy:
                 continue
                 
             # Find a deployment point
-            deploy_point = self._get_hero_deploy_point()
+            deploy_point = self._get_hero_deploy_point(frame)
             
             # Select hero
             self.input.click(bx, by, pause=0.2, rand=False)
@@ -102,20 +112,41 @@ class AttackStrategy:
             else:
                 time.sleep(random.uniform(0.1, 0.2))
 
-    def _get_hero_deploy_point(self):
-        # Pick a random line between corners
+    def _hero_corner_xy(self, corner: str) -> Tuple[int, int]:
+        """Corner used when building hero deploy lines; on ``16_9``, ``top`` is nudge-scaled."""
+        px, py = self.config.get_point(corner)
+        if self.config.aspect_key == ASPECT_16_9 and corner == "top":
+            py -= self.config.scale_scalar(70)
+        return int(px), int(py)
+
+    @staticmethod
+    def _quantize_deploy_to_frame(px: float, py: float, fw: int, fh: int) -> Tuple[int, int]:
+        """Clamp to ``[0, fw-1]`` x ``[0, fh-1]``, round to nearest pixels."""
+        if fw <= 0 or fh <= 0:
+            return int(round(px)), int(round(py))
+        cx = max(0.0, min(float(fw - 1), float(px)))
+        cy = max(0.0, min(float(fh - 1), float(py)))
+        return int(round(cx)), int(round(cy))
+
+    def _get_hero_deploy_point(self, frame: Optional[Any] = None) -> Tuple[int, int]:
         c_name = random.choice(["top", "right", "left"])
-        c1 = self.data[c_name]
-        
-        if c_name in ["left", "right"]:
-            c2 = self.data["top"]
+        c1x, c1y = self._hero_corner_xy(c_name)
+
+        if c_name in ("left", "right"):
+            c2x, c2y = self._hero_corner_xy("top")
         else:
-            c2 = self.data[random.choice(["left", "right"])]
-            
+            corner = random.choice(["left", "right"])
+            c2x, c2y = self._hero_corner_xy(corner)
+
         t = random.uniform(0, 1)
-        x = c1[0] + (c2[0] - c1[0]) * t
-        y = c1[1] + (c2[1] - c1[1]) * t
-        return int(x), int(y)
+        xf = c1x + (c2x - c1x) * t
+        yf = c1y + (c2y - c1y) * t
+
+        if frame is not None and getattr(frame, "size", 0):
+            fh, fw = frame.shape[:2]
+            return self._quantize_deploy_to_frame(xf, yf, fw, fh)
+
+        return int(round(xf)), int(round(yf))
 
     @staticmethod
     def _earthquake_anchor_triplet(data: dict, offset: int) -> Tuple[Tuple[float, float], ...]:
@@ -188,12 +219,13 @@ class AttackStrategy:
         return out
 
     def deploy_spells(self, frame):
+        self._sync_frame_size(frame)
         roi = self.vision.bottom_half_region(frame)
         bx, by = self.vision.find_template(frame, "earthquake.png", region=roi)
         if bx:
             self.input.click(bx, by, pause=0.2)
-            offset = int(self.data.get("earthquake", 400))
-            ltr = self._earthquake_anchor_triplet(self.data, offset)
+            offset = int(self.config.get_scaled("earthquake", 400))
+            ltr = self._earthquake_anchor_triplet(self._scaled_deployment_data(), offset)
             points = self._sample_arc_through_three(ltr, 11)
             if random.choice((True, False)):
                 points.reverse()
@@ -219,6 +251,7 @@ class TroopSpamStrategy(AttackStrategy):
 
     def execute(self, frame, stop_event=None):
         ev = stop_event or self.stop_event
+        self._sync_frame_size(frame)
         logger.info(f"Executing {self.troop_name} strategy")
 
         roi = self.vision.bottom_half_region(frame)
@@ -239,9 +272,12 @@ class TroopSpamStrategy(AttackStrategy):
 
         # Path definition
         corners = ["top", "right", "bottom", "left"]
-        # Avoid starting at bottom (index 2) to prevent UI interference
-        start_idx = random.choice([0, 1, 3])
-        direction = random.choice([1, -1]) # 1 = CW, -1 = CCW
+        # 16:9: spam only begins at left or right edge; otherwise avoid starting at bottom.
+        if self.config.aspect_key == ASPECT_16_9:
+            start_idx = random.choice([1, 3])
+        else:
+            start_idx = random.choice([0, 1, 3])
+        direction = random.choice([1, -1])  # 1 = CW, -1 = CCW
         
         # Create ordered list of corners: [Start, 2, 3, 4, Start]
         ordered_corners = []
@@ -252,7 +288,7 @@ class TroopSpamStrategy(AttackStrategy):
         # Start Deployment (The "Anchor")
         start_corner = ordered_corners[0]
         # We need to track current position for human_move
-        curr_x, curr_y = self._expand_loc(*self.data[start_corner])
+        curr_x, curr_y = self._expand_loc(*self._point(start_corner))
         
         self.input.mouse_down(curr_x, curr_y)
         if ev and ev.wait(0.65):
@@ -268,7 +304,7 @@ class TroopSpamStrategy(AttackStrategy):
                     break
 
                 next_c = ordered_corners[i+1]
-                target_x, target_y = self._expand_loc(*self.data[next_c])
+                target_x, target_y = self._expand_loc(*self._point(next_c))
                 duration = random.uniform(segment_duration * 0.9, segment_duration * 1.1)
 
                 self.input.human_move(curr_x, curr_y, target_x, target_y, duration=duration)
@@ -283,6 +319,7 @@ class TroopSpamStrategy(AttackStrategy):
 
         frame = self.input.window_service.screenshot()
         if frame is not None:
+            self._sync_frame_size(frame)
             self.deploy_heroes(frame)
 
             if ev and ev.is_set():
@@ -290,5 +327,6 @@ class TroopSpamStrategy(AttackStrategy):
 
             frame = self.input.window_service.screenshot()
             if frame is not None:
+                self._sync_frame_size(frame)
                 self.deploy_spells(frame)
         return True

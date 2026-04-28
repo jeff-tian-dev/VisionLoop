@@ -17,6 +17,18 @@ def get_resource_path(relative_path: str) -> Path:
 
     return base_path / relative_path
 
+
+def get_template_path(template_name: str) -> Path:
+    """
+    Return ``templates/<16_10|16_9>/…`` for the active aspect (see :class:`app.config.Config`).
+    ``template_name`` should be a filename like ``attack.png`` (not a subpath with ``..``).
+    """
+    from app.config import Config  # local import: avoids circular import at app load
+
+    sub = Config().aspect_key
+    return get_resource_path(f"templates/{sub}/{template_name}")
+
+
 def ensure_dir(path: Path) -> None:
     """Ensure a directory exists."""
     path.mkdir(parents=True, exist_ok=True)

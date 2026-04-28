@@ -11,7 +11,6 @@ A Windows automation bot for Clash of Clans that farms resources using image rec
 - **Multiple attack strategies** – Valkyries, Sneaky Goblins, Super Minions
 - **Star Bonus mode** – Automatically stops when the daily star bonus is claimed
 - **Configurable duration** – Run for a set number of minutes or use quick presets (5m, 10m, 20m)
-- **Auto Upgrade Walls** – Optional wall upgrade logic when resources are full
 - **Responsive Stop** – Stops within seconds when you click Stop, even during troop deployment
 - **Window handle recovery** – Re-finds the game window each session, so you can close and reopen the game without restarting the bot
 

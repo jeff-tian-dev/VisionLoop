@@ -29,6 +29,7 @@ env.bak/
 venv.bak/
 autoloot.log
 player_list.json
+cursor_positions.txt
 
 # Copied from system Tesseract install for PyInstaller (run scripts/prepare_tesseract_bundle.py)
 build_assets/tesseract/

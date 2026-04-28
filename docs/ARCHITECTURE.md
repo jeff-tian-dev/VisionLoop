@@ -63,7 +63,7 @@ flowchart TB
 | `app/services/vision.py` | OpenCV template matching, optional ROI (bottom half), helpers for color. |
 | `app/services/input.py` | Win32 `SendMessage`: clicks, mouse down/up, Bezier “human” moves, wheel. |
 | `app/services/taskbar_thumb.py` | Optional: taskbar thumbnail Start/Stop (Windows + COM). |
-| `app/ui/gui.py` | CustomTkinter: method, duration, star bonus, walls switch; starts/stops bot thread. |
+| `app/ui/gui.py` | CustomTkinter: method, duration, star bonus; starts/stops bot thread. |
 | `app/utils/common.py` | `get_resource_path` for dev vs PyInstaller (`sys._MEIPASS`). |
 | `app/utils/logger.py` | Shared loggers (console + rotating `autoloot.log`; default level ERROR). |
 | `templates/` | `data.json` (coordinates per resolution) + PNG templates for vision. |
@@ -130,7 +130,7 @@ The bot calls `find_window()` again at the **start of each run** so a closed/reo
 
 ## Core bot loop (`app/core/bot.py`)
 
-`Bot.start(method, run_time_minutes, upgrade_walls, star_bonus, status_callback)`:
+`Bot.start(method, run_time_minutes, star_bonus, status_callback)`:
 
 1. Ensures the window exists (`find_window()` or error).
 2. Clears `stop_event`, sets `running`.
@@ -140,16 +140,15 @@ The bot calls `find_window()` again at the **start of each run** so a closed/reo
 
 ### `_run_loop` sequence (each iteration)
 
-1. Optional **`_handle_walls`**: currently a **stub** (`pass`). The README mentions wall upgrades; the hook exists but no resource/bar logic is implemented yet.
-2. **`_find_match_and_attack`**:
+1. **`_find_match_and_attack`**:
    - Wait for and click `attack.png` → `farmbattle.png` → optionally `attack2.png`.
    - Wait for `find.png` (Next / search UI) up to 30s.
    - Grab one screenshot, build a **`TroopSpamStrategy`** from `method` (see below), call `strategy.execute`.
    - **`_wait_for_battle_end`**: Sneaky Goblins favor surrender; others wait for end battle, with fallbacks.
    - Returns a flag: **True** means “troop not found” → main loop **breaks** after cleanup.
-3. **`_return_home`**: `okay.png` then `returnhome.png`.
-4. **`_home_screen_recovery`**: Up to 15 attempts — dismiss `okay.png` if present; else if `attack.png` appears in the **bottom-half ROI**, consider home.
-5. Light scroll on home; if **star bonus** mode, **`_is_star_bonus_claimed`** (no strong match on `emptystar.png`) → break.
+2. **`_return_home`**: `okay.png` then `returnhome.png`.
+3. **`_home_screen_recovery`**: Up to 15 attempts — dismiss `okay.png` if present; else if `attack.png` appears in the **bottom-half ROI**, consider home.
+4. Light scroll on home; if **star bonus** mode, **`_is_star_bonus_claimed`** (no strong match on `emptystar.png`) → break.
 
 ### Method IDs (GUI → bot)
 
@@ -234,21 +233,19 @@ One PNG per template name referenced in code (`attack.png`, `farmbattle.png`, `o
 1. **New resolution**: Add a profile to `data.json` and extend `Config.load_config` selection logic (today only 1920×1080 vs default).
 2. **New strategy**: Subclass `AttackStrategy` or mirror `TroopSpamStrategy`; wire `Bot._get_strategy`.
 3. **New UI step**: Add template PNG, call `_wait_for_image` or `VisionService.find_template` from `Bot`.
-4. **Wall upgrades**: `_handle_walls` is intentionally empty; implement resource detection (possibly using `VisionService.get_color_fraction` or new templates) before relying on the README feature.
-5. **Emulators other than CROSVM**: May need different `child_class` or title matching in `WindowService`.
-6. **Terms of service**: Automation may violate game ToS; this is educational software (see README disclaimer).
+4. **Emulators other than CROSVM**: May need different `child_class` or title matching in `WindowService`.
+5. **Terms of service**: Automation may violate game ToS; this is educational software (see README disclaimer).
 
 ---
 
 ## Quick reference: one attack cycle (ordered)
 
-1. (Optional) Wall handling — stub.
-2. Click Attack → Find Match → optional second Attack.
-3. Wait for match / Next UI (`find.png`).
-4. Screenshot → troop strategy (drag loop, heroes, spells).
-5. End battle (surrender / end battle).
-6. Okay → Return Home.
-7. Home recovery (Okay popups + Attack visible).
-8. Scroll; star bonus check if enabled.
+1. Click Attack → Find Match → optional second Attack.
+2. Wait for match / Next UI (`find.png`).
+3. Screenshot → troop strategy (drag loop, heroes, spells).
+4. End battle (surrender / end battle).
+5. Okay → Return Home.
+6. Home recovery (Okay popups + Attack visible).
+7. Scroll; star bonus check if enabled.
 
 This matches the implementation in `Bot._run_loop`, `_find_match_and_attack`, `_return_home`, and `_home_screen_recovery`.

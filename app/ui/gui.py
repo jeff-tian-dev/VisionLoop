@@ -4,6 +4,7 @@ import threading
 import winsound
 import platform
 from typing import Any, Dict, List
+from app.config import enforce_game_window_aspect_startup
 from app.core.bot import Bot
 from app.utils.logger import setup_logger
 from app.utils.player_list_store import PlayerEntry, load_players, save_players
@@ -366,15 +367,6 @@ class AutoLootApp(ctk.CTk):
         opt_row.grid(row=0, column=0, sticky="ew", padx=CARD_PAD, pady=(CARD_PAD, 6))
         opt_row.grid_columnconfigure(0, weight=1)
 
-        self.wall_switch = ctk.CTkSwitch(
-            opt_row,
-            text="Auto Upgrade Walls",
-            font=ctk.CTkFont(size=13),
-            onvalue=True,
-            offvalue=False,
-        )
-        self.wall_switch.grid(row=0, column=0, sticky="w")
-
         self.star_bonus_switch = ctk.CTkSwitch(
             opt_row,
             text="Star Bonus",
@@ -383,7 +375,7 @@ class AutoLootApp(ctk.CTk):
             offvalue=False,
             command=self._on_star_bonus_toggle,
         )
-        self.star_bonus_switch.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.star_bonus_switch.grid(row=0, column=0, sticky="w")
 
         self.ranked_attack_switch = ctk.CTkSwitch(
             opt_row,
@@ -397,7 +389,7 @@ class AutoLootApp(ctk.CTk):
             button_color=("#f87171", "#ef4444"),
             button_hover_color=DANGER_HOVER,
         )
-        self.ranked_attack_switch.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.ranked_attack_switch.grid(row=1, column=0, sticky="w", pady=(8, 0))
 
         # Timer section (greyed out when Star Bonus is on)
         self.timer_frame = ctk.CTkFrame(card_options, fg_color="transparent")
@@ -585,7 +577,6 @@ class AutoLootApp(ctk.CTk):
             return
 
         method = self._get_method()
-        walls = self.wall_switch.get()
         multi_arg = self._multi_run_players_for_start()
         if self.multi_run_switch.get() and not multi_arg:
             messagebox.showerror(
@@ -612,7 +603,7 @@ class AutoLootApp(ctk.CTk):
                 self._taskbar_thumb.update_buttons(running=True)
             self.bot_thread = threading.Thread(
                 target=self._run_star_bonus_thread,
-                args=(method, walls, multi_arg),
+                args=(method, multi_arg),
                 daemon=True,
             )
             self.bot_thread.start()
@@ -626,19 +617,18 @@ class AutoLootApp(ctk.CTk):
                 self._taskbar_thumb.update_buttons(running=True)
             self.bot_thread = threading.Thread(
                 target=self._run_bot_thread,
-                args=(method, mins, walls, multi_arg),
+                args=(method, mins, multi_arg),
                 daemon=True,
             )
             self.bot_thread.start()
 
-    def _run_star_bonus_thread(self, method, walls, multi_run_players):
+    def _run_star_bonus_thread(self, method, multi_run_players):
         def on_status(msg):
             self.after(0, lambda m=msg: self._update_status(m, warning="not found" in m.lower()))
         try:
             self.bot.start(
                 method,
                 5,
-                walls,
                 star_bonus=True,
                 status_callback=on_status,
                 multi_run_players=multi_run_players,
@@ -649,14 +639,13 @@ class AutoLootApp(ctk.CTk):
             error_msg = str(e)
         self.after(0, lambda: self._on_bot_finished(error_msg))
 
-    def _run_bot_thread(self, method, mins, walls, multi_run_players):
+    def _run_bot_thread(self, method, mins, multi_run_players):
         def on_status(msg):
             self.after(0, lambda m=msg: self._update_status(m, warning="not found" in m.lower()))
         try:
             self.bot.start(
                 method,
                 mins,
-                walls,
                 status_callback=on_status,
                 multi_run_players=multi_run_players,
                 ranked_fill=self.ranked_attack_switch.get(),
@@ -704,6 +693,7 @@ def _center_window(root):
 
 
 def run_gui():
+    enforce_game_window_aspect_startup()
     app = AutoLootApp()
     _center_window(app)
     app.mainloop()

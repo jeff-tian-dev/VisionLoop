@@ -1,16 +1,110 @@
 import json
-import pyautogui
-from pathlib import Path
-from typing import Dict, Any, List
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
 from app.utils.common import get_resource_path
 from app.utils.logger import setup_logger
 
 logger = setup_logger("Config")
 
+# Subfolder under templates/ (Windows paths cannot use ":"; "16:10" → 16_10).
+ASPECT_16_10 = "16_10"
+ASPECT_16_9 = "16_9"
+
+# Max deviation from 16:9 vs 16:10 aspect ratios (ratio space, not pixels).
+_ASPECT_TOLERANCE = 0.03
+
+# Canonical resolutions templates + data.json coords are authored for (per-folder).
+ASPECT_BASELINE: Dict[str, tuple[int, int]] = {
+    ASPECT_16_10: (2560, 1600),
+    ASPECT_16_9: (2560, 1440),
+}
+
+
+def resolve_aspect_key(width: int, height: int) -> Optional[str]:
+    """``16_9``, ``16_10``, or ``None`` when the pixel size is neither aspect within tolerance."""
+    if width <= 0 or height <= 0:
+        return None
+    r = width / height
+    r16_9 = 16.0 / 9.0
+    r16_10 = 16.0 / 10.0
+    d9 = abs(r - r16_9)
+    d10 = abs(r - r16_10)
+    if min(d9, d10) > _ASPECT_TOLERANCE:
+        return None
+    return ASPECT_16_9 if d9 < d10 else ASPECT_16_10
+
+
+def enforce_game_window_aspect_startup() -> None:
+    """
+    If the detected Clash game window is not roughly 16:9 or ~16:10, show an error and exit.
+    Uses the outer window rectangle (same as screenshots), not the primary monitor size.
+    If the game window cannot be found, the GUI still starts — aspect will be checked again
+    from captures when farming.
+    Call before constructing the GUI (before ``Bot`` / ``Config``).
+    """
+    try:
+        from app.services.window import WindowService
+
+        ws = WindowService()
+        size = ws.get_outer_pixel_size()
+    except Exception as e:
+        logger.warning(f"Could not probe game window for aspect ({e}); skipping startup check.")
+        return
+
+    if size is None:
+        logger.warning(
+            "Clash window not found — skipping aspect-ratio block at startup. "
+            "Open the game before starting the bot."
+        )
+        return
+
+    w, h = size
+    if resolve_aspect_key(w, h) is not None:
+        return
+
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "Clash AutoLoot",
+            "Aspect ratio not supported (resize the game window to ~16:9 or ~16:10).",
+        )
+        root.destroy()
+    except Exception as e:
+        logger.error(
+            f"Game window aspect not supported (~{w}x{h}). Could not show dialog: {e}"
+        )
+        print("Aspect ratio not supported", file=sys.stderr)
+    sys.exit(0)
+
+
+def _default_aspect_key() -> str:
+    """Pick folder from game window dimensions when visible; otherwise default to ``16_10``."""
+    try:
+        from app.services.window import WindowService
+
+        ws = WindowService()
+        if ws.hwnd:
+            oz = ws.get_outer_pixel_size()
+            if oz:
+                w, h = oz
+                key = resolve_aspect_key(w, h)
+                if key is not None:
+                    return key
+    except Exception:
+        pass
+    return ASPECT_16_10
+
+
 class Config:
     """Singleton configuration manager."""
+
     _instance = None
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(Config, cls).__new__(cls)
@@ -20,32 +114,58 @@ class Config:
     def __init__(self):
         if self._initialized:
             return
-            
+
         self.data: Dict[str, Any] = {}
-        self.width: int = 0
-        self.height: int = 0
+        self.aspect_key: str = _default_aspect_key()
+        self.ref_width, self.ref_height = ASPECT_BASELINE[self.aspect_key]
+        self.width = self.ref_width
+        self.height = self.ref_height
         self.load_config()
         self._initialized = True
 
+    def _apply_aspect(self, key: str) -> None:
+        if key not in ASPECT_BASELINE:
+            key = ASPECT_16_10
+        self.aspect_key = key
+        rw, rh = ASPECT_BASELINE[key]
+        self.ref_width = int(rw)
+        self.ref_height = int(rh)
+
+    def set_aspect_for_screen_size(self, width: int, height: int) -> bool:
+        """
+        If the client size matches a different 16:9 / 16:10 asset set, reload `data.json`.
+        Returns True when the aspect (and on-disk config) actually changed.
+        """
+        if width <= 0 or height <= 0:
+            return False
+        new_key = resolve_aspect_key(width, height)
+        if new_key is None:
+            logger.error(
+                f"Unsupported capture aspect (~{width}x{height}); need ~16:9 or ~16:10."
+            )
+            return False
+        if new_key == self.aspect_key:
+            return False
+        self._apply_aspect(new_key)
+        self.load_config()
+        logger.info(f"Switched to {self.aspect_key} profile ({self.ref_width}x{self.ref_height} ref)")
+        return True
+
     def load_config(self) -> None:
-        """Load configuration from data.json based on screen resolution."""
+        """Load ``templates/<aspect_key>/data.json`` (pixels in baseline resolution)."""
         try:
-            config_path = get_resource_path("templates/data.json")
+            config_path = get_resource_path(f"templates/{self.aspect_key}/data.json")
             with open(config_path, "r") as f:
                 temp_data = json.load(f)
 
-            self.width, self.height = pyautogui.size()
-            
-            # Resolution detection logic from original code
-            if self.width == 1920 and self.height == 1080:
-                logger.info(f"Resolution detected: 1920x1080")
-                self.data = temp_data[1]
-            else:
-                logger.info(f"Resolution detected: {self.width}x{self.height} (Defaulting to 2560x1600 profile)")
-                self.data = temp_data[0]
-                
+            self.data = temp_data[0] if isinstance(temp_data, list) else temp_data
+            logger.info(
+                f"Loaded config profile {self.aspect_key} (ref {self.ref_width}x{self.ref_height}): "
+                f"{config_path.name}"
+            )
+
         except FileNotFoundError:
-            logger.error("data.json not found in templates directory!")
+            logger.error(f"data.json not found for aspect {self.aspect_key}!")
             raise
         except json.JSONDecodeError:
             logger.error("data.json is invalid JSON!")
@@ -57,13 +177,63 @@ class Config:
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
 
-    def get_point(self, key: str) -> List[int]:
-        """Retrieve a coordinate point from config."""
+    def set_target_size(self, width: int, height: int) -> None:
+        """Reload aspect folder if needed; store current capture size for coordinate scaling."""
+        if width <= 0 or height <= 0:
+            return
+        self.set_aspect_for_screen_size(width, height)
+        self.width = int(width)
+        self.height = int(height)
+
+    def set_target_size_from_frame(self, frame: Any) -> None:
+        """Sync aspect + target size from a screenshot-shaped array."""
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return
+        h, w = frame.shape[:2]
+        self.set_target_size(int(w), int(h))
+
+    def scale_factors(
+        self, size: Optional[Tuple[int, int]] = None
+    ) -> Tuple[float, float]:
+        """Scale factor from authored ref size to current capture."""
+        tw, th = size if size is not None else (self.width, self.height)
+        return tw / self.ref_width, th / self.ref_height
+
+    def template_scale(self, height: Optional[int] = None) -> float:
+        """Vertical scale factor (distance-like scalars multiply by ref height ratio)."""
+        target_h = height if height is not None else self.height
+        return target_h / self.ref_height
+
+    def scale_point(
+        self, point: List[int], size: Optional[Tuple[int, int]] = None
+    ) -> List[int]:
+        """Map **[x,y]** from baseline authoring to current pixels."""
+        sx, sy = self.scale_factors(size)
+        return [
+            int(round(point[0] * sx)),
+            int(round(point[1] * sy)),
+        ]
+
+    def scale_scalar(self, value: int, height: Optional[int] = None) -> int:
+        return int(round(value * self.template_scale(height)))
+
+    def get_point(
+        self, key: str, size: Optional[Tuple[int, int]] = None
+    ) -> List[int]:
         val = self.data.get(key)
-        if not val:
-            raise KeyError(f"Key '{key}' not found in configuration.")
+        if not val or not isinstance(val, (list, tuple)) or len(val) < 2:
+            raise KeyError(f"Key '{key}' missing or not a two-element point.")
+        return self.scale_point([int(val[0]), int(val[1])], size)
+
+    def get_scaled(
+        self, key: str, default: Any = None, height: Optional[int] = None
+    ) -> Any:
+        """Numeric scalar from JSON scaled by vertical ratio to current capture."""
+        val = self.data.get(key, default)
+        if isinstance(val, (int, float)):
+            return self.scale_scalar(int(val), height)
         return val
 
     def reload(self):
-        """Reload configuration from disk."""
+        """Reload configuration from disk for the current aspect."""
         self.load_config()

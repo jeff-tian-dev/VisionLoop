@@ -8,7 +8,8 @@ import numpy as np
 from PIL import Image
 from typing import Optional, Tuple, List
 
-from app.utils.common import get_resource_path
+from app.config import Config
+from app.utils.common import get_template_path
 from app.utils.logger import setup_logger
 
 try:
@@ -52,6 +53,28 @@ class VisionService:
     """Handles image recognition and processing."""
 
     @staticmethod
+    def _template_scale_xy(screen_img: np.ndarray) -> Tuple[float, float]:
+        """Scale from authored ref (:attr:`Config.ref_width` / ``ref_height``) to screenshot size."""
+        h, w = screen_img.shape[:2]
+        cfg = Config()
+        return w / cfg.ref_width, h / cfg.ref_height
+
+    @staticmethod
+    def _resize_template_for_screen(
+        template: np.ndarray, screen_img: np.ndarray
+    ) -> np.ndarray:
+        """Resize reference PNG templates to match the current capture."""
+        sx, sy = VisionService._template_scale_xy(screen_img)
+        if abs(sx - 1.0) < 0.001 and abs(sy - 1.0) < 0.001:
+            return template
+
+        t_h, t_w = template.shape[:2]
+        new_w = max(1, int(round(t_w * sx)))
+        new_h = max(1, int(round(t_h * sy)))
+        interp = cv2.INTER_AREA if min(sx, sy) < 1.0 else cv2.INTER_CUBIC
+        return cv2.resize(template, (new_w, new_h), interpolation=interp)
+
+    @staticmethod
     def bottom_half_region(screen_img: np.ndarray) -> Tuple[int, int, int, int]:
         """ROI (x, y, w, h) covering the bottom half of the screenshot."""
         h, w = screen_img.shape[:2]
@@ -84,11 +107,12 @@ class VisionService:
         Returns (center_x, center_y) or (None, None).
         """
         try:
-            template_path = str(get_resource_path(f"templates/{template_name}"))
+            template_path = str(get_template_path(template_name))
             template = cv2.imread(template_path)
             if template is None:
                 logger.error(f"Template not found: {template_path}")
                 return None, None
+            template = VisionService._resize_template_for_screen(template, screen_img)
 
             if region:
                 x, y, w, h = region
@@ -104,13 +128,17 @@ class VisionService:
                 search_img = screen_img
                 offset_x, offset_y = 0, 0
 
+            t_h, t_w = template.shape[:2]
+            s_h, s_w = search_img.shape[:2]
+            if t_w > s_w or t_h > s_h:
+                return None, None
+
             result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
             if max_val < threshold:
                 return None, None
 
-            t_h, t_w = template.shape[:2]
             center_x = offset_x + max_loc[0] + t_w // 2
             center_y = offset_y + max_loc[1] + t_h // 2
 
@@ -133,11 +161,12 @@ class VisionService:
         Returns (None, None, confidence) if not found above threshold.
         """
         try:
-            template_path = str(get_resource_path(f"templates/{template_name}"))
+            template_path = str(get_template_path(template_name))
             template = cv2.imread(template_path)
             if template is None:
                 logger.error(f"Template not found: {template_path}")
                 return None, None, 0.0
+            template = VisionService._resize_template_for_screen(template, screen_img)
 
             if region:
                 x, y, w, h = region
@@ -150,13 +179,17 @@ class VisionService:
                 search_img = screen_img
                 offset_x, offset_y = 0, 0
 
+            t_h, t_w = template.shape[:2]
+            s_h, s_w = search_img.shape[:2]
+            if t_w > s_w or t_h > s_h:
+                return None, None, 0.0
+
             result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
             if max_val < threshold:
                 return None, None, float(max_val)
 
-            t_h, t_w = template.shape[:2]
             center_x = offset_x + max_loc[0] + t_w // 2
             center_y = offset_y + max_loc[1] + t_h // 2
 
@@ -179,10 +212,11 @@ class VisionService:
         Returns a list of (x, y) coordinates.
         """
         try:
-            template_path = str(get_resource_path(f"templates/{template_name}"))
+            template_path = str(get_template_path(template_name))
             template = cv2.imread(template_path)
             if template is None:
                 return []
+            template = VisionService._resize_template_for_screen(template, screen_img)
 
             if region:
                 x, y, w, h = region
@@ -191,6 +225,11 @@ class VisionService:
             else:
                 search_img = screen_img
                 offset_x, offset_y = 0, 0
+
+            t_h, t_w = template.shape[:2]
+            s_h, s_w = search_img.shape[:2]
+            if t_w > s_w or t_h > s_h:
+                return []
 
             if use_grayscale:
                 search_gray = cv2.cvtColor(search_img, cv2.COLOR_BGR2GRAY)
@@ -211,7 +250,6 @@ class VisionService:
 
             yloc, xloc = (result >= threshold).nonzero()
             
-            t_h, t_w = template.shape[:2]
             points = []
             
             for (px, py) in zip(xloc, yloc):
@@ -284,7 +322,7 @@ class VisionService:
     @staticmethod
     def preprocess_bw_ui_text(bgr: np.ndarray) -> np.ndarray:
         """
-        Normalize screenshot regions that look like `testplayerfont.png`: dark glyphs on a light field.
+        Normalize screenshot regions that look like nameplate / settings text: dark glyphs on a light field.
         Produces a single-channel image suitable for Tesseract.
         """
         if bgr is None or bgr.size == 0:
@@ -405,7 +443,7 @@ class VisionService:
     ) -> List[OcrWordBox]:
         """
         Locate words via OCR. Tuned for high-contrast black (or dark) text on white / light backgrounds,
-        similar to ``templates/testplayerfont.png``.
+        similar to a small, high-contrast player-name crop (dark on light).
 
         Requires the ``tesseract`` binary on PATH (Windows: install from
         https://github.com/UB-Mannheim/tesseract/wiki ) and ``pip install pytesseract``.
