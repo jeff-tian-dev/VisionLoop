@@ -18,6 +18,21 @@ def get_resource_path(relative_path: str) -> Path:
     return base_path / relative_path
 
 
+def get_user_app_data_dir() -> Path:
+    """Per-user writable data (Windows: LOCALAPPDATA\\ClashAutoLoot)."""
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            return Path(local) / "ClashAutoLoot"
+    return Path.home() / ".local" / "share" / "ClashAutoLoot"
+
+
+def get_autoloot_log_path() -> Path:
+    """Path to the rotating ``autoloot.log`` (alongside saved license data)."""
+    ensure_dir(get_user_app_data_dir())
+    return get_user_app_data_dir() / "autoloot.log"
+
+
 def get_template_path(template_name: str) -> Path:
     """
     Return ``templates/<16_10|16_9>/…`` for the active aspect (see :class:`app.config.Config`).

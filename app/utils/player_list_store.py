@@ -1,12 +1,15 @@
-"""Persist multi-run player list (JSON)."""
+"""Persist multi-run player list (JSON). Stored under LOCALAPPDATA (see get_player_list_path)."""
 
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, List
+
+from app.utils.common import ensure_dir, get_user_app_data_dir
 
 
 @dataclass
@@ -15,10 +18,22 @@ class PlayerEntry:
     enabled: bool = True
 
 
-def get_player_list_path() -> Path:
+def _legacy_player_list_paths() -> List[Path]:
+    """Older locations next to exe or repo root."""
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent / "player_list.json"
-    return Path(__file__).resolve().parent.parent.parent / "player_list.json"
+        return [Path(sys.executable).parent / "player_list.json"]
+    return [Path(__file__).resolve().parent.parent.parent / "player_list.json"]
+
+
+def get_player_list_path() -> Path:
+    dest = get_user_app_data_dir() / "player_list.json"
+    ensure_dir(dest.parent)
+    if not dest.is_file():
+        for leg in _legacy_player_list_paths():
+            if leg.is_file():
+                shutil.copy2(leg, dest)
+                break
+    return dest
 
 
 def load_players() -> List[PlayerEntry]:

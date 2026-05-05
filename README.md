@@ -21,11 +21,28 @@ A Windows automation bot for Clash of Clans that farms resources using image rec
 - Run the game in a **normal widescreen window**—either a standard 16:9 shape or a slightly taller 16:10-style layout. Don’t use a random or extreme crop; if the shape isn’t supported, the app may close right after opening with a short message.
 - If the game window isn’t open yet, the app can still start—just open Clash before you press **Start** on the bot.
 
+### License key
+
+A valid license key is required to use the bot.
+
+1. After purchasing, you will receive an email with a key in the format `CLASH-XXXX-XXXX-XXXX-XXXX`.
+2. Open the bot and paste the key into the **License Key** field at the top.
+3. Click **Activate**. The indicator dot turns **green** when the key is valid.
+   - **Green** = valid and ready to use.
+   - **Yellow** = checking (or temporarily unable to reach the server — retrying).
+   - **Red** = key is empty, invalid, revoked, or the server has been unreachable for more than 15 minutes.
+4. The key is **bound to this machine** on first activation. To transfer to a new machine, contact support at [clashautoloot@gmail.com](mailto:clashautoloot@gmail.com).
+
+The bot re-validates the key every 3 hours in the background. If your key is revoked while the bot is running, it will stop automatically.
+
+> **Internet connection required.** The bot validates your license on startup and periodically while running. There is no offline mode.
+
 ### Using the app
 
 1. Open **Clash of Clans** and leave the window visible.
 2. Double-click **`ClashAutoLoot`** to open it.
-3. Pick how you want to attack: **Valkyries**, **Sneaky Goblins**, or **Super Minions**.
+3. Enter and activate your **license key** (see above).
+4. Pick how you want to attack: **Valkyries**, **Sneaky Goblins**, or **Super Minions**.
 4. **Multi-run** (optional): turn it on, then **Player list…** to add the account names you see in-game, choose who runs and who is skipped, and put them in the order you want. At least one account must be set to run.
 5. **Ranked attack fill** (optional): only turn this on if you **want** to spend ranked attacks; you’ll get a confirmation screen first.
 6. Either type **how many minutes** to farm (or use the quick **5m / 10m / 20m** buttons), or turn on **Star Bonus** to farm until your daily star bonus is done (the timer is turned off in that mode).
@@ -85,7 +102,7 @@ Clash_Auto_Loot/
 
 ## How It Works
 
-1. **Window detection** – Finds the Clash of Clans window using the Windows API (supports Google Play Games / CROSVM).
+1. **Window detection** – Finds the Google Play Games window (`HwndWrapper` shell + `CROSVM_1` child, title contains Clash of Clans) via the Windows API.
 2. **Aspect and scaling** – Chooses `16_9` vs `16_10` from the outer window size, loads `templates/<aspect>/data.json`, and scales authored coordinates to the current capture size.
 3. **Image recognition** – Uses OpenCV template matching to locate UI elements (Attack, Find Match, Okay, ranked vs farm battle, etc.).
 4. **OCR** – Tesseract is used to match player names when switching accounts in multi-run.

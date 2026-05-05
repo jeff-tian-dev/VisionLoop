@@ -120,14 +120,14 @@ class InputService:
 
         self.move(x2, y2, MK_LBUTTON)
 
-    def scroll(self, x: int, y: int, amount: int):
+    def scroll(self, x: int, y: int, amount: int, *, upward: bool = False):
         hwnd = self.window_service.hwnd
         if not hwnd: return
-        
-        delta = int(-1 * WHEEL_DELTA)
+
+        delta = int(WHEEL_DELTA if upward else -WHEEL_DELTA)
         wparam = delta << 16
         lparam = self._make_lparam(x, y)
-        
+
         for _ in range(amount):
             self.user32.SendMessageW(hwnd, WM_MOUSEWHEEL, wparam, lparam)
             time.sleep(random.uniform(0.05, 0.2))

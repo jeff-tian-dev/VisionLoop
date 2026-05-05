@@ -229,13 +229,12 @@ class AttackStrategy:
             points = self._sample_arc_through_three(ltr, 11)
             if random.choice((True, False)):
                 points.reverse()
-            eq_pause_base = 0.1
-            jitter_px = 30
+            jitter_px = 100
             for cx, cy in points:
                 jx = cx + random.randint(-jitter_px, jitter_px)
                 jy = cy + random.randint(-jitter_px, jitter_px)
                 self.input.click_at(jx, jy, rand=False)
-                delay = eq_pause_base * random.uniform(0.7, 1.3)
+                delay = random.uniform(0.1, 0.3)
                 if self.stop_event:
                     self.stop_event.wait(delay)
                 else:

@@ -1,0 +1,12 @@
+clashautoloot.duckdns.org {
+    reverse_proxy 127.0.0.1:8000
+
+    encode zstd gzip
+
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+    }
+}

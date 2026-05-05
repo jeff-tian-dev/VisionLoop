@@ -35,13 +35,15 @@ def resolve_aspect_key(width: int, height: int) -> Optional[str]:
     return ASPECT_16_9 if d9 < d10 else ASPECT_16_10
 
 
-def enforce_game_window_aspect_startup() -> None:
+def check_game_window_aspect_for_start(parent=None) -> bool:
     """
-    If the detected Clash game window is not roughly 16:9 or ~16:10, show an error and exit.
-    Uses the outer window rectangle (same as screenshots), not the primary monitor size.
-    If the game window cannot be found, the GUI still starts — aspect will be checked again
-    from captures when farming.
-    Call before constructing the GUI (before ``Bot`` / ``Config``).
+    Validate the Clash window before farming starts.
+
+    If the window is missing or its outer size is not roughly 16:9 or 16:10, show an error
+    and return False. If probing the window fails unexpectedly, log and return True so the
+    bot can still try (matches the old startup skip behavior).
+
+    ``parent`` is passed to :func:`tkinter.messagebox.showerror` when available (e.g. main CTk window).
     """
     try:
         from app.services.window import WindowService
@@ -49,37 +51,54 @@ def enforce_game_window_aspect_startup() -> None:
         ws = WindowService()
         size = ws.get_outer_pixel_size()
     except Exception as e:
-        logger.warning(f"Could not probe game window for aspect ({e}); skipping startup check.")
-        return
+        logger.warning(f"Could not probe game window for aspect ({e}); allowing start.")
+        return True
 
     if size is None:
-        logger.warning(
-            "Clash window not found — skipping aspect-ratio block at startup. "
-            "Open the game before starting the bot."
-        )
-        return
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            if parent is None:
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showerror(
+                    "Clash AutoLoot",
+                    "Clash of Clans window not found.\nOpen the game, then press Start.",
+                )
+                root.destroy()
+            else:
+                messagebox.showerror(
+                    "Clash AutoLoot",
+                    "Clash of Clans window not found.\nOpen the game, then press Start.",
+                    parent=parent,
+                )
+        except Exception as e:
+            logger.error(f"Could not show window-not-found dialog: {e}")
+        return False
 
     w, h = size
     if resolve_aspect_key(w, h) is not None:
-        return
+        return True
 
     try:
         import tkinter as tk
         from tkinter import messagebox
 
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror(
-            "Clash AutoLoot",
-            "Aspect ratio not supported (resize the game window to ~16:9 or ~16:10).",
-        )
-        root.destroy()
+        msg = "Aspect ratio not supported (resize the game window to ~16:9 or ~16:10)."
+        if parent is None:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("Clash AutoLoot", msg)
+            root.destroy()
+        else:
+            messagebox.showerror("Clash AutoLoot", msg, parent=parent)
     except Exception as e:
         logger.error(
             f"Game window aspect not supported (~{w}x{h}). Could not show dialog: {e}"
         )
         print("Aspect ratio not supported", file=sys.stderr)
-    sys.exit(0)
+    return False
 
 
 def _default_aspect_key() -> str:

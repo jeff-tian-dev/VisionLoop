@@ -1,0 +1,12 @@
+[Unit]
+Description=DuckDNS IP Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/license-api.env
+ExecStart=/usr/bin/curl -fsS \
+    "https://www.duckdns.org/update?domains=${DUCKDNS_SUBDOMAIN}&token=${DUCKDNS_TOKEN}&ip="
+StandardOutput=journal
+StandardError=journal

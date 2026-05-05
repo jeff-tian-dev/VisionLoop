@@ -1,35 +1,63 @@
+# --- SSH keys & certificates ---
+SSH_VMKEY.key
+*.key
+*.pem
+
+# --- Environment / secrets ---
+*.env
+.env
+.env.local
+.env.*
+
+# --- Planning artifacts ---
+stripe_check.json
+resend_check.json
+
+# --- AI agent context (local only; may describe infra — never commit secrets) ---
+docs/AGENT_INFRA.md
+
+# --- Server ---
+/server/.venv/
+/server/__pycache__/
+/server/**/__pycache__/
+/server/*.egg-info/
+/server/.pytest_cache/
+
+# --- Python ---
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
+*.pyo
+*.pyd
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-autoloot.log
-player_list.json
-cursor_positions.txt
+dist/
+build/
+*.spec
+*.whl
 
-# Copied from system Tesseract install for PyInstaller (run scripts/prepare_tesseract_bundle.py)
-build_assets/tesseract/
+# --- PyInstaller ---
+build/
+dist/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Local / runtime / bundled tooling (large binaries) ---
+autoloot.log
+glyph_debug/
+glyph_dump_latest.txt
+player_list.json
+build_assets/

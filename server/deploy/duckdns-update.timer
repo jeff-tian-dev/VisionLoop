@@ -1,0 +1,10 @@
+[Unit]
+Description=DuckDNS IP Update – every 5 minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

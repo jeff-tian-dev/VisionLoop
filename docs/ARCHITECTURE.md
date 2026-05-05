@@ -59,7 +59,7 @@ flowchart TB
 | `app/config.py` | Singleton: loads `templates/data.json`, picks a resolution profile. |
 | `app/core/bot.py` | Orchestrates the farming loop and navigation between screens. |
 | `app/core/strategies.py` | Attack strategies: troop selection, drag-deploy path, heroes, spells. |
-| `app/services/window.py` | Win32: find window (`Clash of Clans` + child `CROSVM_1`), `PrintWindow` capture. |
+| `app/services/window.py` | Win32: find window (GPG: `HwndWrapper*` + child `CROSVM_1`, title match), `PrintWindow` capture. |
 | `app/services/vision.py` | OpenCV template matching, optional ROI (bottom half), helpers for color. |
 | `app/services/input.py` | Win32 `SendMessage`: clicks, mouse down/up, Bezier “human” moves, wheel. |
 | `app/services/taskbar_thumb.py` | Optional: taskbar thumbnail Start/Stop (Windows + COM). |
@@ -103,7 +103,7 @@ Keys are accessed with `config.get(key)` or `config.get_point(key)` (raises if m
 
 ### WindowService (`app/services/window.py`)
 
-- **Window discovery**: Enumerates visible top-level windows; if title contains `"Clash of Clans"` (case-insensitive), it prefers a child window whose **class name** is `CROSVM_1` (Google Play Games / CROSVM). If no such child exists, it uses the top-level HWND.
+- **Window discovery**: Enumerates visible top-level windows. It uses the first match where the title contains `"Clash of Clans"` (case-insensitive), the **top-level class name** starts with `HwndWrapper` (Google Play Games shell), and a **descendant** exists whose **class name** is `CROSVM_1`. It returns that child HWND only (no fallback to the top-level window). Chromium hosts (Chrome, Discord, …) are skipped because they are not `HwndWrapper`.
 - **DPI**: Tries `SetProcessDpiAwareness(2)` (per-monitor), falls back to `SetProcessDPIAware`.
 - **Screenshot**: `GetWindowRect` → `PrintWindow` with `PW_RENDERFULLCONTENT` → DIB bits → PIL → NumPy BGR for OpenCV. Returns `None` if the window is missing or invalid.
 
@@ -146,8 +146,8 @@ The bot calls `find_window()` again at the **start of each run** so a closed/reo
    - Grab one screenshot, build a **`TroopSpamStrategy`** from `method` (see below), call `strategy.execute`.
    - **`_wait_for_battle_end`**: Sneaky Goblins favor surrender; others wait for end battle, with fallbacks.
    - Returns a flag: **True** means “troop not found” → main loop **breaks** after cleanup.
-2. **`_return_home`**: `okay.png` then `returnhome.png`.
-3. **`_home_screen_recovery`**: Up to 15 attempts — dismiss `okay.png` if present; else if `attack.png` appears in the **bottom-half ROI**, consider home.
+2. **`_return_home`**: `okay.png`; then `returnhome.png` or **chest** flow (`chestclaim.png` → taps → `chestcontinue.png`).
+3. **`_home_screen_recovery`**: Up to 15 attempts — dismiss `okay.png` if present; else if **`builder.png`** appears in the **top-half ROI**, consider home.
 4. Light scroll on home; if **star bonus** mode, **`_is_star_bonus_claimed`** (no strong match on `emptystar.png`) → break.
 
 ### Method IDs (GUI → bot)

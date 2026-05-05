@@ -3,15 +3,29 @@ import random
 import threading
 from typing import List, Optional, Tuple
 
-from app.config import Config
+from app.config import ASPECT_16_10, ASPECT_16_9, Config
 from app.core.strategies import TroopSpamStrategy
 from app.services.input import InputService
-from app.services.vision import VisionService, BOTTOM_HALF_BOT_TEMPLATES
+from app.services.vision import (
+    BOTTOM_HALF_BOT_TEMPLATES,
+    TOP_HALF_BOT_TEMPLATES,
+    VisionService,
+)
 from app.services.window import WindowService
 from app.utils.logger import setup_logger
 from app.utils.player_list_store import PlayerEntry
 
 logger = setup_logger("BotCore")
+
+# Home Village builder portrait (top UI); some builds use ``gbuilder.png`` instead of ``builder.png``.
+_HOME_VILLAGE_BUILDER_TEMPLATES = ("builder.png", "gbuilder.png")
+
+# Builder-menu drag when OCR misses ``wall`` (baseline coords → scaled via :meth:`Config.scale_point`).
+_WALL_OCR_RETRY_DRAG_BASELINE: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {
+    ASPECT_16_10: ((1300, 280), (1300, 980)),
+    ASPECT_16_9: ((1300, 280), (1300, 880)),
+}
+
 
 class Bot:
     """Main Bot Logic."""
@@ -32,6 +46,7 @@ class Bot:
         status_callback=None,
         multi_run_players: Optional[List[PlayerEntry]] = None,
         ranked_fill: bool = False,
+        upgrade_walls: bool = False,
     ):
         """Starts the bot loop. With ``multi_run_players``, runs a full session per enabled player."""
         self._status_callback = status_callback
@@ -46,7 +61,8 @@ class Bot:
         mr = multi_run_players is not None
         logger.info(
             f"Bot started. Method: {method}, Time: {run_time_minutes}m, "
-            f"StarBonus: {star_bonus}, MultiRun: {mr}, RankedFill: {ranked_fill}"
+            f"StarBonus: {star_bonus}, MultiRun: {mr}, RankedFill: {ranked_fill}, "
+            f"UpgradeWalls: {upgrade_walls}"
         )
 
         try:
@@ -58,12 +74,14 @@ class Bot:
                     self._check_stop()
                     self._switch_account_and_load_home(player.name)
                     self._check_stop()
-                    self._run_loop(method, duration, star_bonus, ranked_fill)
+                    self._run_loop(
+                        method, duration, star_bonus, ranked_fill, upgrade_walls
+                    )
                     self._check_stop()
                     self._multi_run_builder_base_after_session()
                     self._check_stop()
             else:
-                self._run_loop(method, duration, star_bonus, ranked_fill)
+                self._run_loop(method, duration, star_bonus, ranked_fill, upgrade_walls)
         except InterruptedError:
             pass
         except Exception as e:
@@ -78,6 +96,13 @@ class Bot:
         self.running = False
         self.stop_event.set()
 
+    def debug_upgrade_walls_now(self) -> None:
+        """Run :meth:`_upgrade_walls` once without ``hgoldfull`` / ``helixirfull`` gate (GUI debug)."""
+        self.stop_event.clear()
+        if not self.window.find_window():
+            raise RuntimeError("Clash of Clans window not found.")
+        self._upgrade_walls()
+
     def _check_stop(self):
         if self.stop_event.is_set():
             raise InterruptedError("Bot stopped by user")
@@ -91,12 +116,223 @@ class Bot:
         x, y = self.config.scale_point([1000, 1000])
         return x, y
 
+    def _nudge_view_to_reveal_attack(self) -> None:
+        """Click ``empty`` (``data.json``) and scroll at anchor to nudge village until Attack is findable."""
+        self.input.click(*self.config.get_point("empty"), pause=0.15)
+        self.input.scroll(*self._scroll_point(), 5)
+
+    def _find_home_village_builder(
+        self, frame, region: Tuple[int, int, int, int]
+    ) -> Tuple[Optional[int], Optional[int]]:
+        for name in _HOME_VILLAGE_BUILDER_TEMPLATES:
+            x, y = self.vision.find_template(frame, name, region=region)
+            if x:
+                return x, y
+        return None, None
+
+    def _find_wall_labels_top_center_ocr(self, frame, **kwargs) -> Optional[Tuple[int, int]]:
+        """
+        Locate a **wall** menu label in the top-center panel; returns ``(x, y)`` center of the
+        bottom-most matching word box or ``None`` (see :meth:`VisionService.find_wall_labels_top_center_ocr`).
+        """
+        return VisionService.find_wall_labels_top_center_ocr(frame, **kwargs)
+
+    def _wall_menu_drag_retry_nudge(self) -> None:
+        """Vertical drag in the builder list when ``wall`` OCR misses (~0.5s eased move + hold pause)."""
+        pair = _WALL_OCR_RETRY_DRAG_BASELINE.get(self.config.aspect_key)
+        if pair is None:
+            logger.warning(
+                "wall OCR retry drag: unknown aspect %r; skipping drag",
+                self.config.aspect_key,
+            )
+            return
+        p1_ref, p2_ref = pair
+        p1 = self.config.scale_point([p1_ref[0], p1_ref[1]])
+        p2 = self.config.scale_point([p2_ref[0], p2_ref[1]])
+        x1, y1 = int(p1[0]), int(p1[1])
+        x2, y2 = int(p2[0]), int(p2[1])
+        self.input.move(x1, y1)
+        self.input.mouse_down(x1, y1)
+        try:
+            self.input.human_move(x1, y1, x2, y2, duration=0.5)
+            if self.stop_event.wait(0.3):
+                return
+        finally:
+            self.input.mouse_up(x2, y2)
+
+    def _should_upgrade_walls(self) -> bool:
+        """True when either full gold or full elixir hero-bar icon matches on the current home frame."""
+        frame = self.window.screenshot()
+        if frame is None:
+            return False
+        self._update_config_size(frame)
+        gx, gy = self.vision.find_template(frame, "hgoldfull.png")
+        ex, ey = self.vision.find_template(frame, "helixirfull.png")
+        return gx is not None or ex is not None
+
+    def _upgrade_walls_pick_resource_and_okay(self) -> None:
+        """Fresh frame → redness → click affordable upgrade icon → Okay (full-frame template match)."""
+        frame = self.window.screenshot()
+        if frame is None:
+            return
+        self._update_config_size(frame)
+        pair = VisionService.upgrade_cost_redness_by_resource_icons(frame)
+        if pair.gold.redness < 0.1:
+            ix, iy = self.vision.find_template(frame, "upgradegold.png")
+            if ix:
+                self.input.click(ix, iy, pause=0.3)
+        elif pair.elixir.redness < 0.1:
+            ix, iy = self.vision.find_template(frame, "upgradeelixir.png")
+            if ix:
+                self.input.click(ix, iy, pause=0.3)
+
+        frame = self.window.screenshot()
+        if frame is None:
+            return
+        self._update_config_size(frame)
+        ox, oy = self.vision.find_template(frame, "okay.png")
+        if ox:
+            self.input.click(ox, oy, pause=0.3)
+
+    def _upgrade_walls(self) -> None:
+        """Open builder menu, scroll to Wall, run Upgrade More → add-wall loop → optional remove + Okay."""
+        frame = self.window.screenshot()
+        if frame is None:
+            return
+        self._update_config_size(frame)
+        top_roi = VisionService.top_half_region(frame)
+        bx, by = self._find_home_village_builder(frame, top_roi)
+        if not bx:
+            return
+        self.input.click(bx, by, pause=0.4)
+        offset = self.config.scale_scalar(300)
+        sy_scroll = by + offset
+        self.input.move(bx, sy_scroll)
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            self._check_stop()
+            # scroll amount must be positive (see InputService.scroll range(amount))
+            self.input.scroll(bx, sy_scroll, 3)
+            if self.stop_event.wait(0.1):
+                return
+
+        wall_pt = None
+        for attempt in range(10):
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                return
+            self._update_config_size(frame)
+            wall_pt = self._find_wall_labels_top_center_ocr(frame)
+            if wall_pt:
+                break
+            if attempt < 9:
+                self._wall_menu_drag_retry_nudge()
+                if self.stop_event.wait(0.12):
+                    return
+        if not wall_pt:
+            return
+        self.input.click(*wall_pt, pause=0.4)
+
+        frame = self.window.screenshot()
+        if frame is None:
+            return
+        self._update_config_size(frame)
+        bot_roi = VisionService.bottom_half_region(frame)
+        umx, umy = self.vision.find_template(
+            frame, "upgrademore.png", region=bot_roi
+        )
+        if not umx:
+            return
+        self.input.click(umx, umy, pause=0.4)
+
+        both_red = False
+        addwall_missing_while_affordable = False
+        while True:
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                break
+            self._update_config_size(frame)
+            pair = VisionService.upgrade_cost_redness_by_resource_icons(frame)
+            gold_red = pair.gold.redness
+            elixir_red = pair.elixir.redness
+            if gold_red < 0.1 or elixir_red < 0.1:
+                bot_roi = VisionService.bottom_half_region(frame)
+                awx, awy = self.vision.find_template(
+                    frame, "addwall.png", region=bot_roi
+                )
+                if awx:
+                    self.input.click(awx, awy, pause=0.3)
+                else:
+                    addwall_missing_while_affordable = True
+                    break
+            else:
+                both_red = True
+                break
+
+        if both_red:
+            frame = self.window.screenshot()
+            if frame is None:
+                return
+            self._update_config_size(frame)
+            bot_roi = VisionService.bottom_half_region(frame)
+            rwx, rwy = self.vision.find_template(
+                frame, "removewall.png", region=bot_roi
+            )
+            if rwx:
+                self.input.click(rwx, rwy, pause=0.4)
+
+            self._upgrade_walls_pick_resource_and_okay()
+        elif addwall_missing_while_affordable:
+            self._upgrade_walls_pick_resource_and_okay()
+
+    def _dismiss_okay_or_exit_on_frame(self, frame) -> bool:
+        """If ``okay.png`` or ``exit.png`` is visible (full frame), click it. Returns True if dismissed."""
+        for name in ("okay.png", "exit.png"):
+            x, y = self.vision.find_template(frame, name)
+            if x:
+                self.input.click(x, y, pause=0.15)
+                return True
+        return False
+
+    def _wait_for_attack_with_nudge(
+        self, timeout: int = 10, error: bool = True
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """Poll bottom-half ``attack.png``; dismiss ``okay`` / ``exit`` popups first; else empty + scroll."""
+        start = time.time()
+        while time.time() - start < timeout:
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                if self.stop_event.wait(0.5):
+                    return None, None
+                continue
+            self._update_config_size(frame)
+            if self._dismiss_okay_or_exit_on_frame(frame):
+                if self.stop_event.wait(0.25):
+                    return None, None
+                continue
+            search_region = self._search_region_for_template(
+                frame, "attack.png", None, None, 200
+            )
+            ax, ay = self.vision.find_template(frame, "attack.png", region=search_region)
+            if ax:
+                return ax, ay
+            self._nudge_view_to_reveal_attack()
+            if self.stop_event.wait(0.35):
+                return None, None
+        if error:
+            logger.warning("Timeout waiting for attack.png")
+        return None, None
+
     def _run_loop(
         self,
         method_id: int,
         duration_seconds: int,
         star_bonus: bool = False,
         ranked_fill: bool = False,
+        upgrade_walls: bool = False,
     ):
         start_time = time.time()
 
@@ -123,10 +359,16 @@ class Bot:
         while time.time() - start_time < duration_seconds:
             self._check_stop()
 
+            # Upgrade walls while still on home (before leaving for an attack).
+            if upgrade_walls and self._should_upgrade_walls():
+                for _ in range(2):
+                    self._check_stop()
+                    self._upgrade_walls()
+
             # Start Attack
             troop_failed = self._find_match_and_attack(method_id, ranked_fill)
 
-            # Return Home (clicks Okay, then Return Home)
+            # Return Home (clicks Okay, then Return Home or chest-claim flow)
             self._return_home()
 
             # Recover/Home Check (get to home screen - Attack button visible)
@@ -148,8 +390,8 @@ class Bot:
 
     def _find_match_and_attack(self, method_id: int, ranked_fill: bool = False) -> bool:
         """Returns True if the bot should stop (troop not found, or ranked limit reached)."""
-        # Click Attack
-        ax, ay = self._wait_for_image("attack.png")
+        # Click Attack (wait with empty + scroll nudge when not visible)
+        ax, ay = self._wait_for_attack_with_nudge()
         if not ax: return False
         self.input.click(ax, ay, pause=0.1)
 
@@ -243,16 +485,103 @@ class Bot:
                 if sx: self.input.click(sx, sy, pause=0.1)
 
     def _return_home(self) -> bool:
-        """Returns True if Okay was found and clicked."""
+        """Dismiss Okay if present, then wait for ``returnhome.png`` (+ ``returnhome2.png`` on 16:10) or ``chestclaim.png`` (mutually exclusive)."""
         ox, oy = self._wait_for_image("okay.png", timeout=10)
         if ox:
             self.input.click(ox, oy, pause=0.1)
 
-        rx, ry = self._wait_for_image("returnhome.png", timeout=10)
-        if rx:
-            self.input.click(rx, ry, pause=0.1)
+        kind, hx, hy = self._wait_for_return_home_or_chest_claim(timeout=10)
+        if kind == "return" and hx:
+            self.input.click(hx, hy, pause=0.1)
+        elif kind == "chest" and hx:
+            logger.info("Post-battle UI: chestclaim.png (replacing return home); running chest flow")
+            self.input.click(hx, hy, pause=0.2)
+            if self.stop_event.wait(0.35):
+                return ox is not None
+            self._tap_empty_until_chest_continue()
 
         return ox is not None
+
+    def _wait_for_return_home_or_chest_claim(
+        self, timeout: int = 10
+    ) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+        """
+        Poll one frame for ``returnhome.png`` (+ ``returnhome2.png`` on 16:10 only) then ``chestclaim.png`` (only one should match).
+        Returns (``\"return\"`` | ``\"chest\"``, x, y) or (None, None, None) on timeout.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                if self.stop_event.wait(0.5):
+                    return None, None, None
+                continue
+            self._update_config_size(frame)
+            rx, ry = None, None
+            returnhome_tpls = (
+                ("returnhome.png", "returnhome2.png")
+                if self.config.aspect_key == ASPECT_16_10
+                else ("returnhome.png",)
+            )
+            for tpl in returnhome_tpls:
+                rx, ry = self.vision.find_template(frame, tpl)
+                if rx:
+                    break
+            if rx:
+                return "return", rx, ry
+            cx, cy = self.vision.find_template(frame, "chestclaim.png")
+            if cx:
+                return "chest", cx, cy
+            if self.stop_event.wait(0.5):
+                return None, None, None
+        logger.warning(
+            "Timeout waiting for returnhome.png / returnhome2.png (16:10) or chestclaim.png"
+        )
+        return None, None, None
+
+    def _random_point_chest_tap_through(self) -> Tuple[int, int]:
+        """Random point near center-right of the capture for chest tap-through (±85 px from anchor)."""
+        w, h = self.config.width, self.config.height
+        if w <= 1 or h <= 1:
+            w, h = self.config.ref_width, self.config.ref_height
+        cx = int(w * 0.75)
+        cy = h // 2
+        j = 85
+        return (
+            max(0, min(w - 1, cx + random.randint(-j, j))),
+            max(0, min(h - 1, cy + random.randint(-j, j))),
+        )
+
+    def _tap_empty_until_chest_continue(self) -> None:
+        """After ``chestclaim`` was clicked: tap center-right (±85px) until ``chestcontinue.png``, then click it (home)."""
+        CHEST_TAP_TIMEOUT = 120.0
+        deadline = time.time() + CHEST_TAP_TIMEOUT
+        while time.time() < deadline:
+            self._check_stop()
+            nx, ny = self._random_point_chest_tap_through()
+            self.input.click_at(nx, ny, rand=False)
+            t0 = time.time()
+            if self.stop_event.wait(0.15):
+                return
+
+            frame2 = self.window.screenshot()
+            if frame2 is not None:
+                self._update_config_size(frame2)
+                tx, ty = self.vision.find_template(frame2, "chestcontinue.png")
+                if tx:
+                    logger.info("Chest reward: chestcontinue.png found; clicking (expect home village)")
+                    self.input.click(tx, ty, pause=0.25)
+                    return
+
+            elapsed = time.time() - t0
+            to_wait = max(0.05, 0.5 - elapsed)
+            if self.stop_event.wait(to_wait):
+                return
+
+        logger.warning(
+            f"chestcontinue.png not seen within {int(CHEST_TAP_TIMEOUT)}s after chest claim; continuing bot loop"
+        )
 
     def _is_star_bonus_claimed(self) -> bool:
         """True if neither emptystar nor glowstar matches strongly (bonus claimed / not shown)."""
@@ -290,7 +619,7 @@ class Bot:
 
             # No popup; Home Village builder portrait (top half) means we're home
             top_roi = VisionService.top_half_region(frame)
-            hx, hy = self.vision.find_template(frame, "builder.png", region=top_roi)
+            hx, hy = self._find_home_village_builder(frame, top_roi)
             if hx:
                 return
 
@@ -322,6 +651,7 @@ class Bot:
             tesseract_config="--psm 11",
             match_alnum_only=True,
             fuzzy_min_ratio=0.8,
+            white_text=True,
         )
         if not ucx:
             err = f'Multi-run: could not find username "{username}" on screen (OCR)'
@@ -337,7 +667,7 @@ class Bot:
         if not ax:
             err = (
                 f"Multi-run: Home Village not ready after loading {username!r} "
-                "(builder.png / attack.png timeout after login / leaving Builder Base)"
+                "(builder.png|gbuilder.png / attack.png timeout after login / leaving Builder Base)"
             )
             logger.error(err)
             if cb:
@@ -349,10 +679,11 @@ class Bot:
     ) -> Tuple[Optional[int], Optional[int]]:
         """
         After switching accounts: dismiss idle UI, then poll the **top half** for village type
-        (``mbuilder.png`` = Builder Base, ``builder.png`` = Home Village). If Builder Base,
+        (``mbuilder.png`` = Builder Base; ``builder.png`` or ``gbuilder.png`` = Home Village). If Builder Base,
         leave via :meth:`_leave_builder_base_with_nboat`. When Home Village is detected, return
         ``attack.png`` coordinates from the **bottom half** (battle bar) once visible — same
         template as :meth:`_find_match_and_attack` uses to start battles.
+        Each iteration dismisses ``okay.png`` / ``exit.png`` if present, then village / attack logic; else nudge.
         """
         frame = self.window.screenshot()
         self._update_config_size(frame)
@@ -369,6 +700,10 @@ class Bot:
             frame = self.window.screenshot()
             if frame is not None:
                 self._update_config_size(frame)
+                if self._dismiss_okay_or_exit_on_frame(frame):
+                    if self.stop_event.wait(0.25):
+                        return None, None
+                    continue
                 top_roi = VisionService.top_half_region(frame)
                 mx, my = self.vision.find_template(
                     frame, "mbuilder.png", region=top_roi
@@ -385,9 +720,7 @@ class Bot:
                         return None, None
                     continue
 
-                hx, hy = self.vision.find_template(
-                    frame, "builder.png", region=top_roi
-                )
+                hx, hy = self._find_home_village_builder(frame, top_roi)
                 if hx:
                     bot_roi = VisionService.bottom_half_region(frame)
                     ax, ay = self.vision.find_template(
@@ -396,7 +729,7 @@ class Bot:
                     if ax:
                         return ax, ay
 
-            self.input.click(*empty_pt, pause=0.15)
+            self._nudge_view_to_reveal_attack()
             if self.stop_event.wait(0.35):
                 return None, None
         return None, None
@@ -524,6 +857,7 @@ class Bot:
             min_confidence=20,
             preprocess=True,
             tesseract_config="--psm 11",
+            white_text=True,
         )
         blob = " ".join(w.text for w in words).lower()
         if "supercell id" in blob:
@@ -664,6 +998,8 @@ class Bot:
             y0 = max(0, y_anchor - y_slop)
             y1 = min(h, y_anchor + y_slop)
             return (0, y0, w, y1 - y0)
+        if template in TOP_HALF_BOT_TEMPLATES:
+            return VisionService.top_half_region(frame)
         if template in BOTTOM_HALF_BOT_TEMPLATES:
             return VisionService.bottom_half_region(frame)
         return None

@@ -6,3 +6,4 @@ pyautogui
 keyboard
 customtkinter
 pyinstaller
+requests

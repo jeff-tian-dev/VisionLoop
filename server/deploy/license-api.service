@@ -1,0 +1,23 @@
+[Unit]
+Description=Clash Auto Loot – License Validation API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=licapi
+Group=licapi
+EnvironmentFile=/etc/license-api.env
+WorkingDirectory=/opt/license-api
+ExecStart=/opt/license-api/.venv/bin/uvicorn server.app:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --proxy-headers \
+    --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

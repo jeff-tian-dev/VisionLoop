@@ -1,9 +1,14 @@
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
+from typing import Optional
 
-def setup_logger(name: str = "AutoLoot", log_file: str = "autoloot.log", level: int = logging.ERROR) -> logging.Logger:
+
+def setup_logger(
+    name: str = "AutoLoot",
+    log_file: Optional[str] = None,
+    level: int = logging.ERROR,
+) -> logging.Logger:
     """Configures and returns a logger instance."""
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -20,6 +25,12 @@ def setup_logger(name: str = "AutoLoot", log_file: str = "autoloot.log", level: 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+
+    # File Handler (Rotating) — default: %LOCALAPPDATA%\\ClashAutoLoot\\autoloot.log
+    if log_file is None:
+        from app.utils.common import get_autoloot_log_path
+
+        log_file = str(get_autoloot_log_path())
 
     # File Handler (Rotating)
     try:

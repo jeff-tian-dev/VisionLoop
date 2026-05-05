@@ -18,6 +18,9 @@ WHEEL_DELTA    = 120
 
 class WindowService:
     """Handles window finding and screenshot capture using Windows API."""
+
+    # Google Play Games for PC: outer window is typically WPF / HwndWrapper; game surface is CROSVM_1.
+    _TOP_LEVEL_CLASS_PREFIX = "HwndWrapper"
     
     def __init__(self, window_name: str = "Clash of Clans", child_class: str = "CROSVM_1"):
         self.window_name = window_name
@@ -41,13 +44,21 @@ class WindowService:
             logger.info(f"Window found: {self.window_name} (HWND: {self.hwnd})")
             return True
         else:
-            logger.warning(f"Window not found: {self.window_name}")
+            logger.warning(
+                f"Window not found: {self.window_name} "
+                f"(expect title substring, {self._TOP_LEVEL_CLASS_PREFIX!r} top-level, "
+                f"and {self.child_class!r} child — Google Play Games)"
+            )
             return False
 
     def _get_hwnd_partial(self, name: str, child_class: str) -> int:
         """
-        Returns the child HWND (e.g. CROSVM_1) under the top-level window whose title
-        contains `name`. Falls back to the top-level HWND if the child isn't found.
+        Returns the child HWND (``CROSVM_1``) under a **Google Play Games–style** top-level window:
+        title contains ``name`` (case-insensitive), top-level class name starts with
+        :attr:`_TOP_LEVEL_CLASS_PREFIX`, and a descendant with window class ``child_class`` exists.
+
+        Skips Chromium hosts (Discord, Chrome, etc.) and does **not** fall back to the top-level
+        HWND when ``child_class`` is missing, so the first bogus title match is not used.
         """
         result = {"hwnd": 0}
         EnumWindows = self.user32.EnumWindows
@@ -56,6 +67,7 @@ class WindowService:
         GetWindowText = self.user32.GetWindowTextW
         IsWindowVisible = self.user32.IsWindowVisible
         EnumChildWindows = self.user32.EnumChildWindows
+        top_prefix = self._TOP_LEVEL_CLASS_PREFIX
 
         def get_class(hwnd) -> str:
             buf = ctypes.create_unicode_buffer(256)
@@ -84,9 +96,12 @@ class WindowService:
                     title = buff.value
 
                     if name.lower() in title.lower():
+                        if not get_class(hwnd).startswith(top_prefix):
+                            return True
                         child = find_descendant_by_class(hwnd, child_class)
-                        result["hwnd"] = child if child else hwnd
-                        return False
+                        if child:
+                            result["hwnd"] = child
+                            return False
             return True
 
         EnumWindows(EnumWindowsProc(enum_top_cb), 0)

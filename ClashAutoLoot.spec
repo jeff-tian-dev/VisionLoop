@@ -1,36 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec: one-file GUI build with templates + bundled Tesseract (Windows).
-# Before building:  python scripts/prepare_tesseract_bundle.py
+"""PyInstaller spec: run from repo root: python -m PyInstaller --noconfirm ClashAutoLoot.spec"""
 
-from pathlib import Path
-
-project_root = Path(SPEC).resolve().parent
-
-tesseract_root = project_root / "build_assets" / "tesseract"
-
-datas = [("templates", "templates")]
-binaries = []
-
-if tesseract_root.is_dir() and (tesseract_root / "tesseract.exe").is_file():
-    tessdata = tesseract_root / "tessdata"
-    if tessdata.is_dir():
-        datas.append((str(tessdata), "tessdata"))
-    for f in sorted(tesseract_root.iterdir()):
-        if f.is_file() and f.suffix.lower() in (".dll", ".exe"):
-            binaries.append((str(f), "."))
-else:
-    print(
-        "WARNING: build_assets/tesseract is missing or incomplete. "
-        "OCR will not work in the frozen exe until you run:\n"
-        "  python scripts/prepare_tesseract_bundle.py"
-    )
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
+# PyInstaller 6 Analysis expects hook-style (src_dir_or_file, dest_dir) tuples, not Tree().
+datas = [
+    ("templates", "templates"),
+    ("build_assets/tesseract", "."),
+    *collect_data_files("customtkinter"),
+]
+
 a = Analysis(
-    [str(project_root / "app" / "main.py")],
-    pathex=[str(project_root)],
-    binaries=binaries,
+    ["app/main.py"],
+    pathex=["."],
+    binaries=[],
     datas=datas,
     hiddenimports=[
         "app",
