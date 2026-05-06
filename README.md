@@ -1,4 +1,4 @@
-# Clash AutoLoot
+# VisionLoop
 
 A Windows automation bot for Clash of Clans that farms resources using image recognition. The bot automates the attack loop: find a match, deploy troops, return home, and repeat.
 
