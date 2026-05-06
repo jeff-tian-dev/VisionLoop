@@ -1,125 +1,144 @@
-# VisionLoop
+# Clash AutoLoot
 
-A Windows automation bot for Clash of Clans that farms resources using image recognition. The bot automates the attack loop: find a match, deploy troops, return home, and repeat.
+A production Windows desktop application that automates Clash of Clans resource farming using a custom computer vision and Win32 input injection pipeline — deployed with a commercial licensing backend, SaaS billing, and a bundled PyInstaller distribution.
 
 ![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+![OpenCV](https://img.shields.io/badge/OpenCV-template%20matching-green.svg)
+![FastAPI](https://img.shields.io/badge/backend-FastAPI%20%2B%20Stripe-009688.svg)
 
-## HOW TO USE
+---
 
-### Install
+## What this project is
 
-1. Open **[Releases](https://github.com/jeff-tian-dev/VisionLoop/releases)** for this project.
-2. Download the latest **`ClashAutoLoot.exe`** (or the main Windows build attached there).
-3. Save it somewhere you’re happy to run it from (Desktop or a folder is fine). You can run it as-is; no Python install needed.
+End-to-end software product:
 
-### Before you run it
+- **Windows desktop app** — Python / CustomTkinter, packaged as a self-contained `.exe` with PyInstaller (Tesseract bundled; no user install required).
+- **Computer vision loop** — real-time OpenCV template matching across two aspect-ratio asset packs, with a Tesseract OCR pipeline for numeric HUD reading and account name detection.
+- **Win32 input injection** — synthetic `SendMessage` mouse events sent directly to the game's child HWND, allowing the bot to run while the user is tabbed out.
+- **Commercial licensing backend** — FastAPI service with hardware-bound license key validation, machine fingerprinting via Windows registry + WMI, Stripe webhooks, Postgres, and rate limiting via SlowAPI.
 
-- Use **Windows**.
-- Play **Clash of Clans on PC** (for example Google Play Games).
-- Run the game in a **normal widescreen window**—either a standard 16:9 shape or a slightly taller 16:10-style layout. Don’t use a random or extreme crop; if the shape isn’t supported, the app may close right after opening with a short message.
-- If the game window isn’t open yet, the app can still start—just open Clash before you press **Start** on the bot.
+---
 
-### License key
+## Technical highlights
 
-A valid license key is required to use the bot.
+### Window discovery and DPI-aware capture
+The game runs inside Google Play Games on PC — a layered Win32 process with an outer `HwndWrapper`-class shell and a nested `CROSVM_1` guest surface. `WindowService` walks the full `EnumChildWindows` tree to resolve the correct child HWND while explicitly skipping Chromium hosts (Discord, Chrome) that share title substrings. DPI awareness is set via `SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE)` before any capture, ensuring raw pixel dimensions match template coordinates.
 
-1. After purchasing, you will receive an email with a key in the format `CLASH-XXXX-XXXX-XXXX-XXXX`.
-2. Open the bot and paste the key into the **License Key** field at the top.
-3. Click **Activate**. The indicator dot turns **green** when the key is valid.
-   - **Green** = valid and ready to use.
-   - **Yellow** = checking (or temporarily unable to reach the server — retrying).
-   - **Red** = key is empty, invalid, revoked, or the server has been unreachable for more than 15 minutes.
-4. The key is **bound to this machine** on first activation. To transfer to a new machine, contact support at [clashautoloot@gmail.com](mailto:clashautoloot@gmail.com).
+### Aspect-aware coordinate scaling
+All authored coordinates and image templates exist at two reference resolutions — **2560×1440** (16:9) and **2560×1600** (16:10). At runtime, `Config` (singleton) detects the window aspect within a configurable tolerance, loads the matching `data.json`, and proportionally scales every point and scalar to the live capture dimensions. Adding a new game UI element means editing the JSON at the reference resolution, not the live size.
 
-The bot re-validates the key every 3 hours in the background. If your key is revoked while the bot is running, it will stop automatically.
+### Computer vision pipeline
+`VisionService` handles two distinct workloads:
 
-> **Internet connection required.** The bot validates your license on startup and periodically while running. There is no offline mode.
+- **Template matching**: OpenCV `matchTemplate` over full or half-frame ROIs (game splits naturally — battle controls on the bottom half, HUD on the top). Thresholds are tuned per-template; common UI elements like the attack button, ranked/farm battle selector, star bonus indicators, and all hero/troop icons are matched this way.
+- **OCR pipeline**: For the resource HUD (gold / elixir / dark elixir) and player name matching, a preprocessing chain runs before Tesseract: crop ROI → linear upscale (3× for HUD digits) → binarization → Tesseract `image_to_data` → word-box grouping → confidence filtering → digit string parsing. The pipeline maps Tesseract pixel boxes back to screen coordinates after upscaling.
 
-### Using the app
+### Non-negative loot delta tracking
+Raw HUD OCR is noisy frame-to-frame. Rather than trusting absolute reads, `Bot` takes a diff snapshot immediately before each attack and accumulates only **non-negative deltas** across (gold, elixir, dark elixir). Negative deltas — which indicate an OCR misread or a wall upgrade spend — are logged with both snapshots and optionally surfaced to the UI via a callback, but are never added to session totals. This gives a reliable "loot earned this session" counter without false positives.
 
-1. Open **Clash of Clans** and leave the window visible.
-2. Double-click **`ClashAutoLoot`** to open it.
-3. Enter and activate your **license key** (see above).
-4. Pick how you want to attack: **Valkyries**, **Sneaky Goblins**, or **Super Minions**.
-4. **Multi-run** (optional): turn it on, then **Player list…** to add the account names you see in-game, choose who runs and who is skipped, and put them in the order you want. At least one account must be set to run.
-5. **Ranked attack fill** (optional): only turn this on if you **want** to spend ranked attacks; you’ll get a confirmation screen first.
-6. Either type **how many minutes** to farm (or use the quick **5m / 10m / 20m** buttons), or turn on **Star Bonus** to farm until your daily star bonus is done (the timer is turned off in that mode).
-7. Click **Start** when you’re ready. Use **Stop** anytime—it should stop within a few seconds. You may also see **Start/Stop** on the **taskbar preview** when you hover the app. You may tab out of the game at this point.
+### Human-like input injection
+All mouse events are posted via `SendMessage(WM_LBUTTONDOWN / WM_LBUTTONUP / WM_MOUSEMOVE)` directly to the game HWND. Drag paths use a randomized Bezier curve with ease-in/ease-out timing and per-call coordinate jitter. Coordinates are clamped to the captured window rect before encoding as `LPARAM`, preventing out-of-bounds messages on resize. This approach requires no cursor hooks and works with the window minimized or behind other windows.
 
-### Star Bonus
+### Multi-account automation via OCR
+The multi-run mode switches Clash accounts in sequence. After each account switch, `VisionService` scans the in-game player list using Tesseract and matches the target name with `difflib` sequence matching (tolerates minor OCR artifacts). Session loot resets and the attack loop restarts per account.
 
-With **Star Bonus** on, the bot keeps going until it no longer sees the “you still have a bonus to earn” stars on your home screen, then it stops on its own.
+### Hardware-bound licensing
+`HardwareFingerprint` derives a stable 32-hex machine ID by combining the Windows `MachineGuid` (HKLM registry) with the motherboard serial (WMI). The SHA-256 digest is sent with every validation request, binding the license to the machine on first activation. The client `LicenseManager` runs a background thread that revalidates every 3 hours, with a 30-second retry loop and a 15-minute hard timeout before entering UNREACHABLE state. The bot halts automatically on key revocation.
 
-### Multi-run
+### FastAPI licensing backend
+The `server/` package is a production FastAPI service:
 
-The app saves your player list as **`player_list.json`** in the **same folder** as **`ClashAutoLoot.exe`**. Order matters: that’s the order it visits accounts. **Skip** means it won’t farm that account this round.
+- `/v1/validate` — checks key + fingerprint against Postgres via a stored procedure, handles not-found / revoked / machine-mismatch / expiry responses.
+- `/v1/trial/heartbeat` — trial session accounting.
+- Stripe webhooks handle subscription lifecycle (new, renewed, canceled, expired).
+- SlowAPI rate limiting on public endpoints.
+- All database interactions go through async `asyncpg` connection pool.
 
-### Ranked attack fill
+---
 
-This uses **ranked** battles instead of regular farming. Only enable it if you’re okay using up ranked attacks during your run.
+## Architecture
 
-## For developers
+```
+app/
+├── main.py                  # Entry: Tesseract env → CustomTkinter GUI
+├── config.py                # Aspect detection, data.json loading, coordinate scaling (singleton)
+├── core/
+│   ├── bot.py               # Attack loop, loot tracking, multi-run sequencing
+│   └── strategies.py        # Troop deployment — Valkryies, Sneaky Goblins, Super Minions;
+│                            #   hero activation, earthquake placement (Bezier arc or random fill)
+├── services/
+│   ├── window.py            # Win32 HWND discovery, DPI-aware BitBlt screenshot
+│   ├── input.py             # SendMessage injection, Bezier human_move, scroll
+│   ├── vision.py            # OpenCV template matching, Tesseract OCR pipeline, HUD parsing
+│   ├── license.py           # HardwareFingerprint, LicenseManager state machine
+│   ├── trial.py             # Trial session heartbeat client
+│   └── taskbar_thumb.py     # Windows taskbar thumbnail Start/Stop buttons (DWM API)
+├── ui/
+│   ├── gui.py               # AutoLootApp (CTk), bot thread management, loot/status callbacks
+│   ├── dialogs.py           # Player list, profile settings, ranked confirm dialogs
+│   ├── widgets.py           # StatusDot, card helpers, loot HUD widget
+│   └── theme.py             # Colors, spacing constants
+└── utils/
+    ├── common.py            # get_resource_path (dev + frozen), LOCALAPPDATA writable dir
+    ├── logger.py            # Rotating file + stderr handler
+    ├── player_list_store.py # Multi-run JSON persistence
+    ├── profile_settings_store.py
+    └── tesseract_env.py     # Tesseract path resolution (bundled vs system vs env var)
 
-**Technical architecture, subsystems, threading, and where to change vision/bot behavior** are documented in **[`DEVELOPER.md`](DEVELOPER.md)**.
+server/                      # FastAPI backend (deployed separately)
+├── app.py                   # Routes: /v1/validate, /v1/trial/heartbeat, Stripe webhook
+├── db.py                    # asyncpg pool, RPC wrappers
+├── stripe_webhook.py        # Subscription lifecycle event handling
+├── fingerprint.py           # Server-side fingerprint format validation
+├── keys.py                  # Key format regex
+└── settings.py              # Pydantic settings (env-based)
 
-Clone the repo, use Python 3.9+, `pip install -r requirements.txt`, and run `python -m app.main`. To build your own `.exe`, see [`build_assets/README.md`](build_assets/README.md) and `ClashAutoLoot.spec` (PyInstaller).
+templates/
+├── 16_9/                    # Asset pack for 16:9 windows (ref 2560×1440)
+│   ├── data.json            # Authored UI coordinates + config at reference resolution
+│   └── *.png                # Template images (attack, farmbattle, ranked, heroes, troops…)
+└── 16_10/                   # Asset pack for 16:10 windows (ref 2560×1600)
+```
+
+---
+
+## Tech stack
+
+| Layer | Choice |
+|---|---|
+| Language | Python 3.9+ |
+| GUI | CustomTkinter (CTk wrapping Tk/Tcl) |
+| Computer vision | OpenCV (`matchTemplate`, morphology, thresholding) |
+| OCR | Tesseract 5 via pytesseract |
+| Win32 | ctypes — `user32`, `gdi32`, `shcore`, `winreg`, DWM |
+| Backend | FastAPI + asyncpg + Postgres |
+| Billing | Stripe (subscriptions + one-time, webhook lifecycle) |
+| Rate limiting | SlowAPI |
+| Packaging | PyInstaller (one-file exe, bundled Tesseract) |
+| HTTP client | requests (client), httpx (server) |
+
+---
+
+## Running locally
 
 ```bash
-python scripts/prepare_tesseract_bundle.py   # optional, if you have this helper
+git clone https://github.com/jeff-tian-dev/VisionLoop.git
+cd VisionLoop
+pip install -r requirements.txt
+python -m app.main
+```
+
+Tesseract must be on `PATH` or set via `TESSERACT_CMD` for OCR features. See [`build_assets/README.md`](build_assets/README.md) for the bundled binary layout used by the `.exe`.
+
+Build the executable:
+
+```bash
 python -m PyInstaller --noconfirm ClashAutoLoot.spec
 ```
 
-Without bundling Tesseract into `build_assets/tesseract`, multi-run OCR in a custom build may need Tesseract installed on the machine or a `TESSERACT_CMD` environment variable.
+Full technical documentation (threading model, vision pipeline details, data.json authoring, backend contract): [`DEVELOPER.md`](DEVELOPER.md).
 
-## Project Structure
+---
 
-```
-Clash_Auto_Loot/
-├── app/
-│   ├── core/
-│   │   ├── bot.py           # Main bot logic and attack loop
-│   │   └── strategies.py    # Attack strategies (troop deployment)
-│   ├── services/
-│   │   ├── input.py         # Mouse/keyboard injection (SendMessage, clamped to capture)
-│   │   ├── vision.py        # Template matching and OCR helpers
-│   │   ├── window.py        # Window detection and screenshots
-│   │   └── taskbar_thumb.py # Windows taskbar preview Start/Stop
-│   ├── ui/
-│   │   └── gui.py           # CustomTkinter interface
-│   ├── utils/
-│   │   ├── common.py        # Resource paths, per-aspect template paths
-│   │   ├── logger.py        # Logging configuration
-│   │   ├── player_list_store.py  # Multi-run player list JSON
-│   │   └── tesseract_env.py # Tesseract path for dev and frozen builds
-│   ├── config.py            # Aspect selection, scaling, data.json loading
-│   └── main.py              # Entry point (Tesseract + GUI)
-├── templates/
-│   ├── 16_9/                # 16:9 pack (ref 2560×1440)
-│   └── 16_10/               # 16:10 pack (ref 2560×1600)
-├── requirements.txt
-└── README.md
-```
-
-## How It Works
-
-1. **Window detection** – Finds the Google Play Games window (`HwndWrapper` shell + `CROSVM_1` child, title contains Clash of Clans) via the Windows API.
-2. **Aspect and scaling** – Chooses `16_9` vs `16_10` from the outer window size, loads `templates/<aspect>/data.json`, and scales authored coordinates to the current capture size.
-3. **Image recognition** – Uses OpenCV template matching to locate UI elements (Attack, Find Match, Okay, ranked vs farm battle, etc.).
-4. **OCR** – Tesseract is used to match player names when switching accounts in multi-run.
-5. **Input injection** – Sends mouse clicks and movements to the game window via `SendMessage`, with coordinates clamped to the captured window rectangle.
-6. **Attack strategies** – Deploys troops along configurable paths (corners) with human-like movement timing.
-
-## Configuration
-
-- **`templates/16_9/data.json`** and **`templates/16_10/data.json`** – Coordinates and settings at the reference resolutions above.
-- **`templates/<aspect>/*.png`** – Image templates for that aspect (attack, farmbattle, ranked battle, emptystar, changeuser, etc.).
-
-## Disclaimer
-
-This project is for educational purposes. Use at your own risk. Automating games may violate the terms of service of Clash of Clans. The authors are not responsible for any consequences of using this software.
-
-## License
-
-MIT License
+*Automating games may violate publisher terms of service. This project is maintained for technical and educational purposes.*
