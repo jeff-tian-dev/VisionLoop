@@ -62,6 +62,8 @@ This uses **ranked** battles instead of regular farming. Only enable it if youâ€
 
 ## For developers
 
+**Technical architecture, subsystems, threading, and where to change vision/bot behavior** are documented in **[`DEVELOPER.md`](DEVELOPER.md)**.
+
 Clone the repo, use Python 3.9+, `pip install -r requirements.txt`, and run `python -m app.main`. To build your own `.exe`, see [`build_assets/README.md`](build_assets/README.md) and `ClashAutoLoot.spec` (PyInstaller).
 
 ```bash
