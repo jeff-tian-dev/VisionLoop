@@ -43,7 +43,7 @@ DUCKDNS_TOKEN=<your-token>
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_ANON_KEY=<your-anon-jwt>
 STRIPE_SECRET_KEY=<sk_test_or_live_...>
-STRIPE_PRICE_ID=<price_...>
+STRIPE_PRICE_ID=<price_lifetime_$99CAD_one_time...>
 # One-time $12 CAD / month-unit (checkout quantity = months). Legacy name retained for VM churn:
 STRIPE_SUBSCRIPTION_PRICE_ID=<price_one_time_extend_...>
 # Optional clearer override (if set, used instead of STRIPE_SUBSCRIPTION_PRICE_ID for extend):
@@ -58,13 +58,13 @@ SUPPORT_EMAIL=clashautoloot@gmail.com
 # 2. Copy server code to VM
 scp -i C:\Projects\Clash_Auto_Loot\SSH_VMKEY.key -r C:\Projects\Clash_Auto_Loot\server\* opc@147.5.112.162:/tmp/license-api-src/
 
-# 3. On VM: move files, write env, run install.sh
-ssh -i C:\Projects\Clash_Auto_Loot\SSH_VMKEY.key opc@147.5.112.162 "sudo mkdir -p /opt/license-api && sudo rsync -av /tmp/license-api-src/ /opt/license-api/"
-ssh -i C:\Projects\Clash_Auto_Loot\SSH_VMKEY.key opc@147.5.112.162 "sudo bash /opt/license-api/deploy/install.sh"
+# 3. On VM: place code under `/opt/license-api/server/`, write env at `/etc/license-api.env`, run install.sh
+ssh -i C:\Projects\Clash_Auto_Loot\SSH_VMKEY.key opc@147.5.112.162 "sudo mkdir -p /opt/license-api/server && sudo rsync -av /tmp/license-api-src/ /opt/license-api/server/"
+ssh -i C:\Projects\Clash_Auto_Loot\SSH_VMKEY.key opc@147.5.112.162 "sudo bash /opt/license-api/server/deploy/install.sh"
 
-# 4. Create Stripe product/prices: one-time lifetime + one-time monthly unit ($12 CAD × quantity months)
-ssh -i C:\Projects\Clash_Auto_Loot\SSH_VMKEY.key opc@147.5.112.162 "sudo /opt/license-api/.venv/bin/python -m server.scripts.ensure_stripe_price"
-ssh -i C:\Projects\Clash_Auto_Loot\SSH_VMKEY.key opc@147.5.112.162 "sudo /opt/license-api/.venv/bin/python -m server.scripts.ensure_stripe_subscription_price"
+# 4. Create Stripe product/prices: one-time **$99 CAD** lifetime + one-time monthly unit ($12 CAD × quantity months)
+ssh -i C:\Projects\Clash_Auto_Loot\SSH_VMKEY.key opc@147.5.112.162 "cd /opt/license-api && sudo /opt/license-api/.venv/bin/python -m server.scripts.ensure_stripe_price"
+ssh -i C:\Projects\Clash_Auto_Loot\SSH_VMKEY.key opc@147.5.112.162 "cd /opt/license-api && sudo /opt/license-api/.venv/bin/python -m server.scripts.ensure_stripe_subscription_price"
 
 # 5. Smoke test
 curl.exe https://clashautoloot.duckdns.org/v1/health
@@ -139,12 +139,23 @@ The next time the customer activates on any machine, that machine becomes the ne
 
 ---
 
+## Updating the lifetime Stripe price
+
+Stripe **Price** objects are immutable (`unit_amount` cannot change). Raising lifetime (e.g. to **$99 CAD**):
+
+1. Deploy updated `server/scripts/ensure_stripe_price.py` to `/opt/license-api/` (see **Updating the Server** below).
+2. On the VM: `cd /opt/license-api && sudo /opt/license-api/.venv/bin/python -m server.scripts.ensure_stripe_price` — creates or selects the CAD one-time Price matching the script’s `UNIT_AMOUNT`, and writes **`STRIPE_PRICE_ID`** to `/etc/license-api.env`.
+3. In Stripe Dashboard, edit your **lifetime Payment Link** (the URL exposed in the desktop app) so it sells that **same** `price_…` as `STRIPE_PRICE_ID`. If the Payment Link URL changes, update `STRIPE_LIFETIME_URL` in the desktop app (`app/ui/theme.py`) and ship a build.
+4. `sudo systemctl restart license-api`. No Supabase migration is required; webhooks match on Price id only.
+
+---
+
 ## Updating the Server
 
 ```powershell
 # From Windows dev machine
 scp -i SSH_VMKEY.key -r server\* opc@147.5.112.162:/tmp/license-api-src/
-ssh -i SSH_VMKEY.key opc@147.5.112.162 "sudo rsync -av --exclude='.venv' /tmp/license-api-src/ /opt/license-api/ && sudo systemctl restart license-api"
+ssh -i SSH_VMKEY.key opc@147.5.112.162 "sudo rsync -av --exclude='.venv' /tmp/license-api-src/ /opt/license-api/server/ && sudo chown -R licapi:licapi /opt/license-api/server && sudo systemctl restart license-api"
 ```
 
 ---
@@ -163,7 +174,7 @@ To rotate the Resend API key:
 ## Before Going Live (checklist)
 
 - [ ] Switch `STRIPE_SECRET_KEY` from `sk_test_...` to `sk_live_...`
-- [ ] Switch `STRIPE_PRICE_ID` to the live mode one-time Price ID (re-run `ensure_stripe_price.py`)
+- [ ] Switch `STRIPE_PRICE_ID` to the live mode **lifetime** Price ID (**$99 CAD** one-time; re-run `ensure_stripe_price.py` after syncing the repo)
 - [ ] Switch `STRIPE_SUBSCRIPTION_PRICE_ID` (or `STRIPE_MONTH_EXTEND_PRICE_ID`) to the live **one-time** month-unit Price ID (re-run `ensure_stripe_subscription_price.py`)
 - [ ] Register a new Stripe webhook for live mode (same three events) and update `STRIPE_WEBHOOK_SECRET`
 - [ ] Verify Resend sending domain `clashautoloot.com` is green in Resend dashboard

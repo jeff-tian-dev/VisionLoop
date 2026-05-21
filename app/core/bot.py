@@ -1,7 +1,7 @@
 import time
 import random
 import threading
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from app.config import ASPECT_16_10, ASPECT_16_9, Config
 from app.core.strategies import TroopSpamStrategy
@@ -14,6 +14,7 @@ from app.services.vision import (
 from app.services.window import WindowService
 from app.utils.logger import setup_logger
 from app.utils.player_list_store import PlayerEntry
+from app.utils.profile_settings_store import EARTHQUAKE_METHOD_CURVE
 
 logger = setup_logger("BotCore")
 
@@ -37,6 +38,14 @@ class Bot:
         self.input = InputService(self.window, self.stop_event)
         self.vision = VisionService()
         self.running = False
+        self._earthquake_method = EARTHQUAKE_METHOD_CURVE
+        # Session loot (reset each :meth:`start`); see :meth:`_loot_snapshot_before_attack`
+        # (runs before wall upgrades when enabled, and again before Attack).
+        self._loot_totals: Tuple[int, int, int] = (0, 0, 0)
+        self._loot_prev_resources: Optional[Tuple[int, int, int]] = None
+        self._loot_session_start_mono: float = 0.0
+        self._loot_callback: Optional[Callable[[int, int, int, float], None]] = None
+        self._suppress_loot_negative_error_once = False
 
     def start(
         self,
@@ -44,15 +53,22 @@ class Bot:
         run_time_minutes: int,
         star_bonus: bool = False,
         status_callback=None,
+        loot_callback: Optional[Callable[[int, int, int, float], None]] = None,
         multi_run_players: Optional[List[PlayerEntry]] = None,
         ranked_fill: bool = False,
         upgrade_walls: bool = False,
+        earthquake_method: str = EARTHQUAKE_METHOD_CURVE,
     ):
         """Starts the bot loop. With ``multi_run_players``, runs a full session per enabled player."""
         self._status_callback = status_callback
+        self._loot_callback = loot_callback
+        self._earthquake_method = earthquake_method
         # Re-find window each time farming starts (hwnd changes when game is closed/reopened)
         if not self.window.find_window():
             raise RuntimeError("Clash of Clans window not found. Please ensure the game is open.")
+
+        self._reset_loot_session()
+        self._emit_loot_update()
 
         self.running = True
         self.stop_event.clear()
@@ -62,7 +78,7 @@ class Bot:
         logger.info(
             f"Bot started. Method: {method}, Time: {run_time_minutes}m, "
             f"StarBonus: {star_bonus}, MultiRun: {mr}, RankedFill: {ranked_fill}, "
-            f"UpgradeWalls: {upgrade_walls}"
+            f"UpgradeWalls: {upgrade_walls}, Earthquake: {earthquake_method}"
         )
 
         try:
@@ -89,6 +105,7 @@ class Bot:
             raise
         finally:
             self.running = False
+            self._earthquake_method = EARTHQUAKE_METHOD_CURVE
             logger.info("Bot stopped.")
 
     def stop(self):
@@ -96,12 +113,85 @@ class Bot:
         self.running = False
         self.stop_event.set()
 
-    def debug_upgrade_walls_now(self) -> None:
-        """Run :meth:`_upgrade_walls` once without ``hgoldfull`` / ``helixirfull`` gate (GUI debug)."""
-        self.stop_event.clear()
-        if not self.window.find_window():
-            raise RuntimeError("Clash of Clans window not found.")
-        self._upgrade_walls()
+    def _reset_loot_session(self) -> None:
+        """Reset counters for a new :meth:`start` — no disk persistence."""
+        self._loot_totals = (0, 0, 0)
+        self._loot_prev_resources = None
+        self._loot_session_start_mono = time.monotonic()
+        self._suppress_loot_negative_error_once = False
+
+    def _emit_loot_update(self) -> None:
+        cb = self._loot_callback
+        if not cb:
+            return
+        g, el, de = self._loot_totals
+        elapsed = max(0.0, time.monotonic() - float(self._loot_session_start_mono))
+        cb(g, el, de, elapsed)
+
+    def _loot_snapshot_before_attack(self) -> None:
+        """
+        On home: OCR top‑right HUD, diff vs previous snapshot, accumulate non‑negative deltas,
+        refresh the baseline.
+
+        Called before wall upgrades (when storages full) **and** immediately before tapping
+        Attack so post‑raid gains are recorded **before** wall spend can make the next snapshot
+        look like a decrease on every resource vs that baseline (which would skip the add).
+
+        When deltas vs the previous snapshot are not all non-negative, session totals are not
+        incremented unless ``_suppress_loot_negative_error_once`` suppresses one skip (set after
+        wall upgrades for the first pre-Attack snapshot that would otherwise count as an error).
+        """
+        frame = self.window.screenshot()
+        if frame is None or frame.size == 0:
+            self._emit_loot_update()
+            return
+        self._update_config_size(frame)
+        groups = VisionService.extract_top_right_hud_numbers(frame)
+        triplet = VisionService.parse_hud_resources_triplet(groups)
+        if triplet is None:
+            logger.debug("Loot tracker: could not parse top-right HUD (%d groups)", len(groups))
+            self._emit_loot_update()
+            return
+        cur_g, cur_el, cur_de = triplet
+        prev = self._loot_prev_resources
+        skipped_due_to_negative_delta = False
+        if prev is not None:
+            lg, le, ld = prev
+            dg = cur_g - lg
+            d_el = cur_el - le
+            d_de = cur_de - ld
+            if dg >= 0 and d_el >= 0 and d_de >= 0:
+                tg, te, td = self._loot_totals
+                self._loot_totals = (tg + dg, te + d_el, td + d_de)
+                logger.info(
+                    "Loot tracker: +%s / +%s / +%s (G/E/DE) → session %s / %s / %s",
+                    dg,
+                    d_el,
+                    d_de,
+                    self._loot_totals[0],
+                    self._loot_totals[1],
+                    self._loot_totals[2],
+                )
+            else:
+                skipped_due_to_negative_delta = True
+                logger.warning(
+                    "Loot tracker: negative delta — previous gold/elixir/dark=%s/%s/%s "
+                    "current read=%s/%s/%s",
+                    lg,
+                    le,
+                    ld,
+                    cur_g,
+                    cur_el,
+                    cur_de,
+                )
+        self._loot_prev_resources = triplet
+        self._emit_loot_update()
+
+        if skipped_due_to_negative_delta:
+            if self._suppress_loot_negative_error_once:
+                self._suppress_loot_negative_error_once = False
+        else:
+            self._suppress_loot_negative_error_once = False
 
     def _check_stop(self):
         if self.stop_event.is_set():
@@ -129,13 +219,6 @@ class Bot:
             if x:
                 return x, y
         return None, None
-
-    def _find_wall_labels_top_center_ocr(self, frame, **kwargs) -> Optional[Tuple[int, int]]:
-        """
-        Locate a **wall** menu label in the top-center panel; returns ``(x, y)`` center of the
-        bottom-most matching word box or ``None`` (see :meth:`VisionService.find_wall_labels_top_center_ocr`).
-        """
-        return VisionService.find_wall_labels_top_center_ocr(frame, **kwargs)
 
     def _wall_menu_drag_retry_nudge(self) -> None:
         """Vertical drag in the builder list when ``wall`` OCR misses (~0.5s eased move + hold pause)."""
@@ -223,7 +306,7 @@ class Bot:
             if frame is None:
                 return
             self._update_config_size(frame)
-            wall_pt = self._find_wall_labels_top_center_ocr(frame)
+            wall_pt = VisionService.find_wall_labels_top_center_ocr(frame)
             if wall_pt:
                 break
             if attempt < 9:
@@ -361,9 +444,13 @@ class Bot:
 
             # Upgrade walls while still on home (before leaving for an attack).
             if upgrade_walls and self._should_upgrade_walls():
+                # Same HUD/delta logic as pre-attack: record loot **before** wall spend so deltas
+                # are non-negative on raid gains; spend on walls is absorbed by the snapshot before Attack.
+                self._loot_snapshot_before_attack()
                 for _ in range(2):
                     self._check_stop()
                     self._upgrade_walls()
+                self._suppress_loot_negative_error_once = True
 
             # Start Attack
             troop_failed = self._find_match_and_attack(method_id, ranked_fill)
@@ -454,14 +541,51 @@ class Bot:
 
     def _get_strategy(self, method_id: int):
         cb = getattr(self, "_status_callback", None)
+        eq = getattr(self, "_earthquake_method", EARTHQUAKE_METHOD_CURVE)
         if method_id == 1:
-            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "sneaky", 15, status_callback=cb)
+            return TroopSpamStrategy(
+                self.input,
+                self.vision,
+                self.config,
+                self.stop_event,
+                "sneaky",
+                15,
+                status_callback=cb,
+                earthquake_method=eq,
+            )
         elif method_id == 2:
-            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "superminion", 3.1, status_callback=cb)
+            return TroopSpamStrategy(
+                self.input,
+                self.vision,
+                self.config,
+                self.stop_event,
+                "superminion",
+                3.1,
+                status_callback=cb,
+                earthquake_method=eq,
+            )
         elif method_id == 3:
-            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "valkyrie", 5.5, status_callback=cb)
+            return TroopSpamStrategy(
+                self.input,
+                self.vision,
+                self.config,
+                self.stop_event,
+                "valkyrie",
+                5.5,
+                status_callback=cb,
+                earthquake_method=eq,
+            )
         else:
-            return TroopSpamStrategy(self.input, self.vision, self.config, self.stop_event, "sneaky", 15, status_callback=cb)
+            return TroopSpamStrategy(
+                self.input,
+                self.vision,
+                self.config,
+                self.stop_event,
+                "sneaky",
+                15,
+                status_callback=cb,
+                earthquake_method=eq,
+            )
 
     def _wait_for_battle_end(self, is_sneaky: bool):
         if is_sneaky:
@@ -673,6 +797,8 @@ class Bot:
             if cb:
                 cb(err)
             raise RuntimeError(err)
+        # New account: baseline must not carry over from the previous village's stash.
+        self._loot_prev_resources = None
 
     def _wake_home_and_wait_for_attack(
         self, timeout: int = 30

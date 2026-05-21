@@ -24,6 +24,6 @@ if __name__ == "__main__":
     freeze_support()
     main()
 
-# python -m PyInstaller --noconfirm --onefile --windowed --name "ClashAutoLoot" --add-data "templates;templates" --paths "." --hidden-import "app" --hidden-import "app.ui" --hidden-import "app.core" --hidden-import "app.services" --hidden-import "app.utils" "app/main.py"
-
-# python -m PyInstaller --noconfirm --onefile --windowed --name "ClashAutoLoot" --add-data "templates;templates" --paths "." --hidden-import "app" --hidden-import "app.ui" --hidden-import "app.core" --hidden-import "app.services" --hidden-import "app.utils" --hidden-import "pytesseract" "app/main.py"
+# Release build (bundles Tesseract + tessdata from %TESSERACT_ROOT% or
+# "C:\Program Files\Tesseract-OCR"; see ClashAutoLoot.spec):
+#   python -m PyInstaller --noconfirm ClashAutoLoot.spec

@@ -193,9 +193,6 @@ class Config:
             logger.error(f"Error loading config: {e}")
             raise
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.data.get(key, default)
-
     def set_target_size(self, width: int, height: int) -> None:
         """Reload aspect folder if needed; store current capture size for coordinate scaling."""
         if width <= 0 or height <= 0:
@@ -252,7 +249,3 @@ class Config:
         if isinstance(val, (int, float)):
             return self.scale_scalar(int(val), height)
         return val
-
-    def reload(self):
-        """Reload configuration from disk for the current aspect."""
-        self.load_config()

@@ -1,4 +1,4 @@
-"""Idempotently create the Stripe product and $50.00 CAD one-time price.
+"""Idempotently create the Stripe product and $99.00 CAD one-time (lifetime) price.
 
 Run from repo root:
     python -m server.scripts.ensure_stripe_price
@@ -14,7 +14,7 @@ import sys
 import stripe
 
 PRODUCT_NAME = "Clash Auto Loot License"
-UNIT_AMOUNT = 5000   # cents
+UNIT_AMOUNT = 9900   # cents ($99.00 CAD lifetime)
 CURRENCY = "cad"
 ENV_FILE = "/etc/license-api.env"
 

@@ -2,8 +2,6 @@ opencv-python
 numpy
 pillow
 pytesseract
-pyautogui
-keyboard
 customtkinter
 pyinstaller
 requests

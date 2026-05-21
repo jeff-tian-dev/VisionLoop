@@ -1,11 +1,6 @@
 import os
 import sys
 from pathlib import Path
-from typing import Tuple, Optional
-
-# Type aliases
-Point = Tuple[int, int]
-Rect = Tuple[int, int, int, int]  # x, y, w, h
 
 def get_resource_path(relative_path: str) -> Path:
     """Get absolute path to resource, works for dev and for PyInstaller."""

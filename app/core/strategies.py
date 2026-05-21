@@ -5,28 +5,39 @@ from typing import Any, List, Optional, Tuple
 
 from app.services.input import InputService
 from app.services.vision import VisionService
-from app.services.window import WindowService
 from app.config import ASPECT_16_9, Config
 from app.utils.logger import setup_logger
+from app.utils.profile_settings_store import EARTHQUAKE_METHOD_CURVE, EARTHQUAKE_METHOD_RANDOM
 
 logger = setup_logger("Strategies")
+
+# Earthquake arc discretization for fill polygon (same geometry as curve placement, finer steps).
+_EARTHQUAKE_REGION_ARC_SAMPLES = 49
+# Horizontal line for random-fill region: ``numerator/denominator`` of the way from screen bottom to top
+# (0 = bottom edge, denominator = top edge). Image y increases downward.
+_EARTHQUAKE_RANDOM_LINE_FROM_BOTTOM = (4, 10)
+
 
 class AttackStrategy:
     """Base class for attack strategies."""
 
-    def __init__(self, input_service: InputService, vision_service: VisionService, config: Config, stop_event=None):
+    def __init__(
+        self,
+        input_service: InputService,
+        vision_service: VisionService,
+        config: Config,
+        stop_event=None,
+        earthquake_method: str = EARTHQUAKE_METHOD_CURVE,
+    ):
         self.input = input_service
         self.vision = vision_service
         self.config = config
         self.stop_event = stop_event
+        self.earthquake_method = earthquake_method
         self.CORNER_ORDER = ["left", "top", "right", "bottom"]
 
     def execute(self, frame, stop_event=None):
         raise NotImplementedError
-
-    def _check_stop(self):
-        if self.stop_event and self.stop_event.is_set():
-            raise InterruptedError("Bot stopped by user")
 
     def _expand_loc(self, x: int, y: int) -> Tuple[int, int]:
         return x + random.randint(-10, 10), y + random.randint(-10, 10)
@@ -39,31 +50,6 @@ class AttackStrategy:
 
     def _scaled_deployment_data(self) -> dict:
         return {key: self._point(key) for key in self.CORNER_ORDER}
-
-    def _corner_helper(self, current: str, direction: int) -> str:
-        idx = self.CORNER_ORDER.index(current)
-        if direction == 1:
-            return self.CORNER_ORDER[(idx + 1) % len(self.CORNER_ORDER)]
-        elif direction == 2:
-            return self.CORNER_ORDER[(idx - 1) % len(self.CORNER_ORDER)]
-        return current
-
-    def _troop_spam_helper(self, corner: str, direction: int, iteration: int, duration: int):
-        if iteration == 4:
-            return
-        
-        current_pos = self._point(corner)
-        next_corner = self._corner_helper(corner, direction)
-        target = self._point(next_corner)
-        
-        # Move from current corner to next corner
-        x1, y1 = self._expand_loc(*current_pos)
-        x2, y2 = target # Target is usually a fixed point in config
-        
-        self.input.human_move(x1, y1, x2, y2, duration)
-        
-        # Recursive call for next leg
-        self._troop_spam_helper(next_corner, direction, iteration + 1, duration)
 
     def deploy_heroes(self, frame):
         self._sync_frame_size(frame)
@@ -218,6 +204,98 @@ class AttackStrategy:
             out.append((int(round(x)), int(round(y))))
         return out
 
+    @staticmethod
+    def _earthquake_horizontal_y(
+        frame_h: int, from_bottom_num: int, from_bottom_den: int
+    ) -> int:
+        """Row ``y`` for a line ``from_bottom_num/from_bottom_den`` of the way from bottom to top."""
+        if frame_h <= 0:
+            return 0
+        h = frame_h
+        f = from_bottom_num / float(from_bottom_den)
+        return int(round((h - 1) * (1.0 - f)))
+
+    @staticmethod
+    def _earthquake_fill_polygon(
+        arc_pts: List[Tuple[int, int]], y_line: int
+    ) -> List[Tuple[int, int]]:
+        """Closed polygon: arc polyline (left→right) then segment along ``y=y_line`` back to start."""
+        if len(arc_pts) < 2:
+            return list(arc_pts)
+        x0, y0 = arc_pts[0]
+        x1, y1 = arc_pts[-1]
+        return list(arc_pts) + [(x1, y_line), (x0, y_line)]
+
+    @staticmethod
+    def _polygon_double_area(poly: List[Tuple[int, int]]) -> float:
+        if len(poly) < 3:
+            return 0.0
+        a = 0.0
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            a += x1 * y2 - x2 * y1
+        return a
+
+    @staticmethod
+    def _point_in_polygon(px: int, py: int, poly: List[Tuple[int, int]]) -> bool:
+        """Even-odd ray test; ``poly`` closed implicitly (last vertex → first not repeated)."""
+        n = len(poly)
+        if n < 3:
+            return False
+        inside = False
+        j = n - 1
+        for i in range(n):
+            ix, iy = poly[i]
+            jx, jy = poly[j]
+            if (iy > py) != (jy > py):
+                x_at = (jx - ix) * (py - iy) / (jy - iy) + ix
+                if px < x_at:
+                    inside = not inside
+            j = i
+        return inside
+
+    @staticmethod
+    def _random_points_in_polygon(
+        poly: List[Tuple[int, int]], frame_w: int, frame_h: int, n_points: int
+    ) -> List[Tuple[int, int]]:
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        min_x = max(0, min(xs))
+        max_x = min(frame_w - 1, max(xs))
+        min_y = max(0, min(ys))
+        max_y = min(frame_h - 1, max(ys))
+        out: List[Tuple[int, int]] = []
+        if max_x < min_x or max_y < min_y:
+            return out
+        for _ in range(n_points):
+            for _try in range(1000):
+                rx = random.randint(min_x, max_x)
+                ry = random.randint(min_y, max_y)
+                if AttackStrategy._point_in_polygon(rx, ry, poly):
+                    out.append((rx, ry))
+                    break
+            else:
+                ax, ay = poly[max(1, len(poly) // 4)]
+                out.append((max(0, min(frame_w - 1, ax)), max(0, min(frame_h - 1, ay))))
+        return out
+
+    def _earthquake_curve_points_with_jitter(
+        self, ltr: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]
+    ) -> List[Tuple[int, int]]:
+        points = self._sample_arc_through_three(ltr, 11)
+        if random.choice((True, False)):
+            points.reverse()
+        jitter_px = 100
+        return [
+            (
+                cx + random.randint(-jitter_px, jitter_px),
+                cy + random.randint(-jitter_px, jitter_px),
+            )
+            for cx, cy in points
+        ]
+
     def deploy_spells(self, frame):
         self._sync_frame_size(frame)
         roi = self.vision.bottom_half_region(frame)
@@ -226,13 +304,28 @@ class AttackStrategy:
             self.input.click(bx, by, pause=0.2)
             offset = int(self.config.get_scaled("earthquake", 400))
             ltr = self._earthquake_anchor_triplet(self._scaled_deployment_data(), offset)
-            points = self._sample_arc_through_three(ltr, 11)
-            if random.choice((True, False)):
-                points.reverse()
-            jitter_px = 100
+            fh, fw = frame.shape[:2]
+            num, den = _EARTHQUAKE_RANDOM_LINE_FROM_BOTTOM
+            y_line = self._earthquake_horizontal_y(fh, num, den)
+
+            if self.earthquake_method == EARTHQUAKE_METHOD_RANDOM:
+                arc_dense = self._sample_arc_through_three(ltr, _EARTHQUAKE_REGION_ARC_SAMPLES)
+                if random.choice((True, False)):
+                    arc_dense = arc_dense[::-1]
+                poly = self._earthquake_fill_polygon(arc_dense, y_line)
+                if abs(self._polygon_double_area(poly)) < 2.0:
+                    logger.warning(
+                        "Earthquake random region degenerate; using curve placement with jitter."
+                    )
+                    points = self._earthquake_curve_points_with_jitter(ltr)
+                else:
+                    points = self._random_points_in_polygon(poly, fw, fh, 11)
+            else:
+                points = self._earthquake_curve_points_with_jitter(ltr)
+
             for cx, cy in points:
-                jx = cx + random.randint(-jitter_px, jitter_px)
-                jy = cy + random.randint(-jitter_px, jitter_px)
+                jx = max(0, min(fw - 1, cx))
+                jy = max(0, min(fh - 1, cy))
                 self.input.click_at(jx, jy, rand=False)
                 delay = random.uniform(0.1, 0.3)
                 if self.stop_event:
@@ -242,8 +335,20 @@ class AttackStrategy:
 
 
 class TroopSpamStrategy(AttackStrategy):
-    def __init__(self, input_service, vision_service, config, stop_event, troop_name: str, duration: int, status_callback=None):
-        super().__init__(input_service, vision_service, config, stop_event)
+    def __init__(
+        self,
+        input_service,
+        vision_service,
+        config,
+        stop_event,
+        troop_name: str,
+        duration: int,
+        status_callback=None,
+        earthquake_method: str = EARTHQUAKE_METHOD_CURVE,
+    ):
+        super().__init__(
+            input_service, vision_service, config, stop_event, earthquake_method=earthquake_method
+        )
         self.troop_name = troop_name
         self.duration = duration
         self.status_callback = status_callback

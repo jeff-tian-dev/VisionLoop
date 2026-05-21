@@ -89,7 +89,7 @@ class InputService:
         mx = (x1 + x2) / 2
         my = (y1 + y2) / 2
         dist = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
-        offset = dist * random.uniform(0.05, 0.2)
+        offset = dist * random.uniform(0.02, 0.15)
         cx = mx + random.uniform(-offset, offset)
         cy = my + random.uniform(-offset, offset)
 

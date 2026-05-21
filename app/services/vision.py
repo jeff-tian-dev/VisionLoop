@@ -50,6 +50,9 @@ _UPGRADE_COST_LEFT_OF_ICON_ROI_AT_BASELINE: Dict[str, Tuple[int, int]] = {
 # ~cap height in px at 1600p for default Y-cluster tolerance scaling.
 _NUMBERS_REF_LINE_HEIGHT_PX = 30
 
+# HUD number crop upscale (linear) **before** binarize; bbox map-back + CC-area scaling applied in :meth:`find_words_ocr`.
+HUD_TOP_RIGHT_NUMBERS_ROI_UPSCALE = 3.0
+
 
 @dataclass(frozen=True)
 class GroupedNumber:
@@ -118,8 +121,8 @@ _WHITE_TEXT_BRIGHTNESS_FLOOR = 220
 
 # Connected-component ink area limits at :data:`app.config.ASPECT_BASELINE` resolution per aspect.
 _CC_INK_AREA_AT_BASELINE: Dict[str, Tuple[int, int]] = {
-    ASPECT_16_10: (150, 800),  # 2560×1600
-    ASPECT_16_9: (130, 750),  # 2560×1440
+    ASPECT_16_10: (100, 600),  # 2560×1600
+    ASPECT_16_9: (80, 500),  # 2560×1440
 }
 
 # Top-center builder / wall-menu OCR: square side in px at each aspect baseline (scaled by width).
@@ -430,126 +433,6 @@ class VisionService:
         )
 
     @staticmethod
-    def find_all_templates(
-        screen_img: np.ndarray,
-        template_name: str,
-        threshold: float = 0.85,
-        region: Optional[Tuple[int, int, int, int]] = None,
-        use_grayscale: bool = False
-    ) -> List[Tuple[int, int]]:
-        """
-        Finds all occurrences of a template.
-        Returns a list of (x, y) coordinates.
-        """
-        try:
-            template_path = str(get_template_path(template_name))
-            template = cv2.imread(template_path)
-            if template is None:
-                return []
-            template = VisionService._resize_template_for_screen(template, screen_img)
-
-            if region:
-                x, y, w, h = region
-                search_img = screen_img[y:y+h, x:x+w]
-                offset_x, offset_y = x, y
-            else:
-                search_img = screen_img
-                offset_x, offset_y = 0, 0
-
-            t_h, t_w = template.shape[:2]
-            s_h, s_w = search_img.shape[:2]
-            if t_w > s_w or t_h > s_h:
-                return []
-
-            if use_grayscale:
-                search_gray = cv2.cvtColor(search_img, cv2.COLOR_BGR2GRAY)
-                template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-                
-                # Morphological processing (TopHat) to highlight features
-                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
-                search_processed = cv2.morphologyEx(search_gray, cv2.MORPH_TOPHAT, kernel)
-                template_processed = cv2.morphologyEx(template_gray, cv2.MORPH_TOPHAT, kernel)
-                
-                # Blur
-                search_processed = cv2.GaussianBlur(search_processed, (3, 3), 0)
-                template_processed = cv2.GaussianBlur(template_processed, (3, 3), 0)
-                
-                result = cv2.matchTemplate(search_processed, template_processed, cv2.TM_CCOEFF_NORMED)
-            else:
-                result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
-
-            yloc, xloc = (result >= threshold).nonzero()
-            
-            points = []
-            
-            for (px, py) in zip(xloc, yloc):
-                cx = offset_x + px + t_w // 2
-                cy = offset_y + py + t_h // 2
-                points.append((cx, cy))
-
-            # Filter duplicates (non-maximum suppression-ish)
-            filtered = []
-            radius = min(t_w, t_h) // 2
-            
-            for pt in points:
-                # Check if point is far enough from existing filtered points
-                if all(((pt[0] - f[0])**2 + (pt[1] - f[1])**2)**0.5 > radius for f in filtered):
-                    filtered.append(pt)
-
-            return filtered
-
-        except Exception as e:
-            logger.error(f"Error in find_all_templates: {e}")
-            return []
-
-    @staticmethod
-    def get_color_fraction(img: np.ndarray, target_hsv: Tuple[int, int, int], tolerance: int = 5) -> float:
-        """
-        Calculates the fraction of pixels matching a specific HSV color.
-        target_hsv: (H, S, V) where H is 0-179.
-        """
-        if img is None: return 0.0
-        
-        hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        target_hue = target_hsv[0]
-        
-        h_min = max(0, target_hue - tolerance)
-        h_max = min(179, target_hue + tolerance)
-        
-        # Hardcoded S/V ranges from original code (100-255)
-        lower = np.array([h_min, 100, 100], dtype=np.uint8)
-        upper = np.array([h_max, 255, 255], dtype=np.uint8)
-        
-        mask = cv2.inRange(hsv_img, lower, upper)
-        matched = cv2.countNonZero(mask)
-        total = img.shape[0] * img.shape[1]
-        
-        return matched / total if total > 0 else 0.0
-
-    @staticmethod
-    def find_leftmost_pixel(img: np.ndarray, target_hsv: Tuple[int, int, int], tolerance: int = 5) -> Tuple[Optional[int], Optional[int]]:
-        """Finds the leftmost pixel matching the target color."""
-        if img is None: return None, None
-        
-        hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        target_hue = target_hsv[0]
-        
-        h_min = max(0, target_hue - tolerance)
-        h_max = min(179, target_hue + tolerance)
-        
-        lower = np.array([h_min, 100, 100], dtype=np.uint8)
-        upper = np.array([h_max, 255, 255], dtype=np.uint8)
-        
-        mask = cv2.inRange(hsv_img, lower, upper)
-        ys, xs = np.nonzero(mask)
-        
-        if len(xs) == 0:
-            return None, None
-            
-        min_idx = np.argmin(xs)
-        return int(xs[min_idx]), int(ys[min_idx])
-
-    @staticmethod
     def preprocess_bw_ui_text(
         bgr: np.ndarray,
         *,
@@ -619,7 +502,7 @@ class VisionService:
     ) -> Tuple[int, int]:
         """
         ``(min_area, max_area)`` for :meth:`filter_binary_ink_by_component_area`, scaled from the
-        aspect baseline: **16:10** → 150 / 800 @ 2560×1600; **16:9** → 130 / 750 @ 2560×1440.
+        aspect baseline: **16:10** → 100 / 600 @ 2560×1600; **16:9** → 80 / 500 @ 2560×1440.
 
         Scales by ``(screen_w / ref_w) * (screen_h / ref_h)`` (blob pixel area vs capture size).
         """
@@ -780,6 +663,439 @@ class VisionService:
         return 0
 
     @staticmethod
+    def save_hud_ocr_debug_outputs(
+        pil_mono: Image.Image,
+        mono_gray: np.ndarray,
+        tess_data: dict,
+        *,
+        tesseract_config: str,
+        tsv_path: Optional[Path],
+        boxes_png_path: Optional[Path],
+    ) -> None:
+        """
+        Write Tesseract ``image_to_tsv`` and a word-level bounding-box overlay (mono / OCR resolution).
+        """
+        if (tsv_path is None and boxes_png_path is None) or pytesseract is None:
+            return
+        if tsv_path is not None:
+            try:
+                ensure_dir(tsv_path.parent)
+                tsv_raw = pytesseract.image_to_tsv(pil_mono, config=tesseract_config)
+                tsv_path.write_text(tsv_raw, encoding="utf-8")
+            except Exception as exc:
+                logger.warning("Could not write OCR debug TSV %s: %s", tsv_path, exc)
+        if boxes_png_path is not None:
+            try:
+                ensure_dir(boxes_png_path.parent)
+                if mono_gray.ndim == 2:
+                    vis = cv2.cvtColor(mono_gray, cv2.COLOR_GRAY2BGR)
+                else:
+                    vis = mono_gray.copy()
+                texts = tess_data.get("text", [])
+                n = len(texts)
+                levels = tess_data.get("level")
+                if not levels or len(levels) < n:
+                    levels = [5] * n
+                for i in range(n):
+                    try:
+                        lv = int(levels[i])
+                    except (TypeError, ValueError):
+                        lv = 5
+                    if lv != 5:
+                        continue
+                    left = int(tess_data["left"][i])
+                    top = int(tess_data["top"][i])
+                    ww = int(tess_data["width"][i])
+                    hh = int(tess_data["height"][i])
+                    if ww <= 0 or hh <= 0:
+                        continue
+                    try:
+                        conf = int(tess_data["conf"][i])
+                    except (TypeError, ValueError):
+                        conf = -1
+                    if conf >= 60:
+                        color = (0, 220, 100)
+                    elif conf >= 30:
+                        color = (0, 200, 255)
+                    else:
+                        color = (60, 60, 255)
+                    cv2.rectangle(vis, (left, top), (left + ww - 1, top + hh - 1), color, 1)
+                    raw = (texts[i] or "").strip()
+                    if raw:
+                        label = raw[:24] if len(raw) <= 24 else raw[:21] + "..."
+                        cv2.putText(
+                            vis,
+                            label,
+                            (left, max(0, top - 2)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.45,
+                            color,
+                            1,
+                            cv2.LINE_AA,
+                        )
+                cv2.imwrite(str(boxes_png_path), vis)
+            except Exception as exc:
+                logger.warning("Could not write OCR debug boxes PNG %s: %s", boxes_png_path, exc)
+
+    @staticmethod
+    def _preprocess_ocr_region(
+        screen_img: np.ndarray,
+        region: Optional[Tuple[int, int, int, int]],
+        *,
+        preprocess: bool,
+        white_text: bool,
+        brightness_floor: Optional[int],
+        cc_filter_blobs: bool,
+        cc_min_area: Optional[int],
+        cc_max_area: Optional[int],
+        roi_upscale: float,
+        save_preprocess_png: Optional[Path],
+    ) -> Optional[Tuple[Image.Image, np.ndarray, float, int, int]]:
+        """
+        Shared OCR preprocessing: ROI crop → optional BGR upscale → grayscale via
+        :meth:`preprocess_bw_ui_text` (when ``preprocess``) → optional
+        :meth:`filter_binary_ink_by_component_area` (defaults from :meth:`scaled_cc_ink_bounds`)
+        → optional ``save_preprocess_png`` of the binary.
+
+        Returns ``(pil_mono, mono_np, coord_scale, offset_x, offset_y)`` for the OCR call,
+        or ``None`` if the input is empty / region is out of bounds.
+        ``coord_scale`` is the BGR upscale factor (1.0 when no upscale); callers map OCR
+        pixel coords back to full-frame using ``inv = 1.0 / coord_scale`` and the offsets.
+        """
+        if screen_img is None or screen_img.size == 0:
+            return None
+
+        full_h, full_w = screen_img.shape[:2]
+        coord_scale = 1.0
+        offset_x, offset_y = 0, 0
+        work = screen_img
+        if region is not None:
+            rx, ry, rw, rh = region
+            h_s, w_s = screen_img.shape[:2]
+            if rx < 0 or ry < 0 or rx + rw > w_s or ry + rh > h_s:
+                logger.warning(f"OCR region {region} out of bounds for image {w_s}x{h_s}")
+                return None
+            work = screen_img[ry : ry + rh, rx : rx + rw]
+            offset_x, offset_y = rx, ry
+            us = float(roi_upscale)
+            if us > 1.0:
+                nh = max(1, int(round(work.shape[0] * us)))
+                nw = max(1, int(round(work.shape[1] * us)))
+                work = cv2.resize(work, (nw, nh), interpolation=cv2.INTER_LINEAR)
+                coord_scale = us
+
+        if preprocess:
+            mono = VisionService.preprocess_bw_ui_text(
+                work,
+                white_text=white_text,
+                brightness_floor=brightness_floor,
+            )
+            if cc_filter_blobs:
+                c_lo, c_hi = cc_min_area, cc_max_area
+                if c_lo is None or c_hi is None:
+                    a_lo, a_hi = VisionService.scaled_cc_ink_bounds(full_w, full_h)
+                    if c_lo is None:
+                        c_lo = a_lo
+                    if c_hi is None:
+                        c_hi = a_hi
+                cc_am = coord_scale * coord_scale
+                if cc_am > 1.0001:
+                    c_lo = int(round(float(c_lo) * cc_am))
+                    c_hi = int(round(float(c_hi) * cc_am))
+                mono = VisionService.filter_binary_ink_by_component_area(
+                    mono,
+                    min_area=int(c_lo),
+                    max_area=int(c_hi),
+                )
+        else:
+            mono = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+
+        if save_preprocess_png is not None:
+            try:
+                ensure_dir(save_preprocess_png.parent)
+                cv2.imwrite(str(save_preprocess_png), mono)
+            except Exception as exc:
+                logger.warning("Could not save OCR preprocess debug PNG: %s", exc)
+
+        pil = Image.fromarray(mono)
+        return pil, mono, coord_scale, offset_x, offset_y
+
+    @staticmethod
+    def _tesseract_single_glyph_confidence_psm10(
+        mono_gray: np.ndarray,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+        *,
+        expected_char: str = "",
+        pad_px: int = 2,
+    ) -> float:
+        """
+        Run a cheap **single-character** Tesseract pass on a mono crop (``--psm 10``) and return
+        the strongest reported word-level confidence (0–100) among recognized tokens, or
+        :data:`math.nan` if none.
+
+        **Note:** Uses **no** character whitelist — a strict whitelist often yields empty output on
+        very narrow glyphs (common for ``image_to_boxes``), which would falsely read as NaN.
+
+        ``image_to_boxes`` does not emit confidences; this auxiliary pass is optional for HUD debug.
+        """
+        if pytesseract is None or mono_gray.size == 0:
+            return math.nan
+        h, w = mono_gray.shape[:2]
+        pad = max(int(pad_px), 1)
+        t0, t1 = max(0, top - pad), min(h, bottom + pad)
+        l0, l1 = max(0, left - pad), min(w, right + pad)
+        if t1 <= t0 or l1 <= l0:
+            return math.nan
+        crop = mono_gray[t0:t1, l0:l1]
+        ch, cw = crop.shape[:2]
+        if ch < 4 or cw < 2:
+            return math.nan
+        if cw < 24 or ch < 20:
+            scale = max(24.0 / float(cw), 20.0 / float(ch), 1.8)
+            nw = max(8, int(round(cw * scale)))
+            nh = max(8, int(round(ch * scale)))
+            crop = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_CUBIC)
+        pil = Image.fromarray(crop)
+        cfg = "--psm 10"
+        try:
+            data = pytesseract.image_to_data(
+                pil, output_type=pytesseract.Output.DICT, config=cfg
+            )
+        except (pytesseract.TesseractNotFoundError, OSError):
+            return math.nan
+        n = len(data.get("text", []))
+        best_c = math.nan
+        best_pri = -1
+        exp = expected_char.strip() or ""
+        best_any = math.nan
+        for i in range(n):
+            try:
+                lv = int(data["level"][i])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if lv != 5:
+                continue
+            raw = (data["text"][i] or "").strip()
+            if not raw:
+                continue
+            try:
+                c = int(data["conf"][i])
+            except (TypeError, ValueError):
+                continue
+            if c < 0:
+                continue
+            fc = float(c)
+            if math.isnan(best_any) or fc > best_any:
+                best_any = fc
+            pri = 2 if raw == exp else (1 if exp and raw == exp[-1:] else 0)
+            if pri > best_pri or (
+                pri == best_pri and (math.isnan(best_c) or fc > float(best_c))
+            ):
+                best_pri = pri
+                best_c = fc
+        if not math.isnan(best_c):
+            return best_c
+        return best_any
+
+    @staticmethod
+    def save_chars_ocr_debug_outputs(
+        mono_gray: np.ndarray,
+        raw_box_text: str,
+        parsed_chars: Sequence[Tuple[str, int, int, int, int]],
+        *,
+        box_path: Optional[Path],
+        boxes_png_path: Optional[Path],
+        glyph_confidences: Optional[Sequence[float]] = None,
+    ) -> None:
+        """
+        Write Tesseract ``image_to_boxes`` raw text (``.box`` format: ``char x1 y1 x2 y2 page``,
+        bottom-origin Y) and a per-character bounding-box overlay (mono / OCR resolution,
+        top-origin Y; ``parsed_chars`` is the converted ``(char, left, top, right, bottom)``
+        tuple list).
+
+        ``glyph_confidences``, when set, must align with ``parsed_chars`` (e.g. PSM-10 estimates);
+        non-finite values are shown as ``?`` on the overlay.
+        """
+        if (box_path is None and boxes_png_path is None) or pytesseract is None:
+            return
+        if box_path is not None:
+            try:
+                ensure_dir(box_path.parent)
+                box_path.write_text(raw_box_text, encoding="utf-8")
+            except Exception as exc:
+                logger.warning("Could not write char-OCR debug box file %s: %s", box_path, exc)
+        if boxes_png_path is not None:
+            try:
+                ensure_dir(boxes_png_path.parent)
+                if mono_gray.ndim == 2:
+                    vis = cv2.cvtColor(mono_gray, cv2.COLOR_GRAY2BGR)
+                else:
+                    vis = mono_gray.copy()
+                color = (0, 220, 100)
+                for i, row in enumerate(parsed_chars):
+                    ch, left, top, right, bottom = row
+                    if right - left <= 0 or bottom - top <= 0:
+                        continue
+                    cv2.rectangle(vis, (left, top), (right - 1, bottom - 1), color, 1)
+                    if ch:
+                        if glyph_confidences is not None and i < len(glyph_confidences):
+                            gc = glyph_confidences[i]
+                            suff = (
+                                f" {gc:.0f}"
+                                if isinstance(gc, (int, float)) and math.isfinite(float(gc))
+                                else " ?"
+                            )
+                            label = (ch + suff)[:32]
+                        else:
+                            label = ch
+                        cv2.putText(
+                            vis,
+                            label,
+                            (left, max(0, top - 2)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.45,
+                            color,
+                            1,
+                            cv2.LINE_AA,
+                        )
+                cv2.imwrite(str(boxes_png_path), vis)
+            except Exception as exc:
+                logger.warning("Could not write char-OCR debug boxes PNG %s: %s", boxes_png_path, exc)
+
+    @staticmethod
+    def find_chars_ocr(
+        screen_img: np.ndarray,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        preprocess: bool = True,
+        white_text: bool = False,
+        tesseract_config: str = "--psm 6",
+        cc_filter_blobs: bool = False,
+        cc_min_area: Optional[int] = None,
+        cc_max_area: Optional[int] = None,
+        brightness_floor: Optional[int] = None,
+        save_preprocess_png: Optional[Path] = None,
+        roi_upscale: float = 1.0,
+        ocr_debug_box_path: Optional[Path] = None,
+        ocr_debug_boxes_png_path: Optional[Path] = None,
+        psm10_glyph_confidence: bool = False,
+    ) -> List[OcrWordBox]:
+        """
+        Character-level OCR via :func:`pytesseract.image_to_boxes`.
+
+        Same preprocessing as :meth:`find_words_ocr` (shared :meth:`_preprocess_ocr_region`).
+        Each returned :class:`OcrWordBox` holds a single glyph in **full-frame** coords.
+        ``image_to_boxes`` does not attach confidences — they stay :data:`math.nan` unless
+        ``psm10_glyph_confidence`` is True, in which case each glyph is re-OCR'd with ``--psm 10``
+        on its mono crop and the reported word confidence (0–100) is stored (or :data:`math.nan`
+        when unavailable).
+
+        ``ocr_debug_box_path`` writes the raw Tesseract ``.box`` text (bottom-origin Y).
+        ``ocr_debug_boxes_png_path`` draws per-character boxes on the mono image (OCR pixel space);
+        with ``psm10_glyph_confidence``, labels include the estimated confidence.
+        """
+        if pytesseract is None:
+            logger.error("pytesseract is not installed; pip install pytesseract and install the Tesseract OCR binary")
+            return []
+
+        prep = VisionService._preprocess_ocr_region(
+            screen_img,
+            region,
+            preprocess=preprocess,
+            white_text=white_text,
+            brightness_floor=brightness_floor,
+            cc_filter_blobs=cc_filter_blobs,
+            cc_min_area=cc_min_area,
+            cc_max_area=cc_max_area,
+            roi_upscale=roi_upscale,
+            save_preprocess_png=save_preprocess_png,
+        )
+        if prep is None:
+            return []
+        pil, mono, coord_scale, offset_x, offset_y = prep
+
+        try:
+            raw = pytesseract.image_to_boxes(pil, config=tesseract_config)
+        except pytesseract.TesseractNotFoundError:
+            logger.error(
+                "Tesseract executable not found. Install Tesseract and ensure it is on PATH "
+                "(e.g. Windows installer from UB Mannheim)."
+            )
+            return []
+
+        mono_h = int(mono.shape[0])
+        inv = 1.0 / coord_scale if coord_scale > 0 else 1.0
+        chars: List[OcrWordBox] = []
+        parsed_chars: List[Tuple[str, int, int, int, int]] = []
+        for line in (raw or "").splitlines():
+            parts = line.strip().split(" ")
+            if len(parts) < 5:
+                continue
+            ch = parts[0]
+            try:
+                x1 = int(parts[1])
+                y1 = int(parts[2])
+                x2 = int(parts[3])
+                y2 = int(parts[4])
+            except ValueError:
+                continue
+            top = mono_h - y2
+            bottom = mono_h - y1
+            left = x1
+            right = x2
+            if right - left <= 0 or bottom - top <= 0:
+                continue
+            parsed_chars.append((ch, left, top, right, bottom))
+            full_left = int(round(float(left) * inv)) + offset_x
+            full_top = int(round(float(top) * inv)) + offset_y
+            full_w_box = max(1, int(round(float(right - left) * inv)))
+            full_h_box = max(1, int(round(float(bottom - top) * inv)))
+            chars.append(
+                OcrWordBox(
+                    left=full_left,
+                    top=full_top,
+                    width=full_w_box,
+                    height=full_h_box,
+                    text=ch,
+                    confidence=math.nan,
+                )
+            )
+
+        glyph_confs_for_vis: Optional[List[float]] = None
+        if psm10_glyph_confidence and parsed_chars:
+            glyph_confs_for_vis = []
+            rebuilt: List[OcrWordBox] = []
+            for (ch, l, t, r, b), ob in zip(parsed_chars, chars):
+                gc = VisionService._tesseract_single_glyph_confidence_psm10(
+                    mono, l, t, r, b, expected_char=ch,
+                )
+                glyph_confs_for_vis.append(gc)
+                rebuilt.append(
+                    OcrWordBox(
+                        ob.left,
+                        ob.top,
+                        ob.width,
+                        ob.height,
+                        ob.text,
+                        gc,
+                    )
+                )
+            chars = rebuilt
+
+        VisionService.save_chars_ocr_debug_outputs(
+            mono,
+            raw or "",
+            parsed_chars,
+            box_path=ocr_debug_box_path,
+            boxes_png_path=ocr_debug_boxes_png_path,
+            glyph_confidences=glyph_confs_for_vis,
+        )
+        return chars
+
+    @staticmethod
     def find_words_ocr(
         screen_img: np.ndarray,
         region: Optional[Tuple[int, int, int, int]] = None,
@@ -797,6 +1113,9 @@ class VisionService:
         cc_max_area: Optional[int] = None,
         brightness_floor: Optional[int] = None,
         save_preprocess_png: Optional[Path] = None,
+        roi_upscale: float = 1.0,
+        ocr_debug_tsv_path: Optional[Path] = None,
+        ocr_debug_boxes_png_path: Optional[Path] = None,
     ) -> List[OcrWordBox]:
         """
         Locate words via OCR. With default preprocessing: dark glyphs on a light field.
@@ -816,7 +1135,9 @@ class VisionService:
             screen_img: BGR screenshot (e.g. from ``WindowService.screenshot()``).
             region: Optional ROI ``(x, y, w, h)`` in screen coordinates.
             query: If set, only return words whose text contains this substring (after normalization).
-            min_confidence: Tesseract confidence 0–100; words below this are dropped.
+            min_confidence: Reserved for API compatibility; **not used** — words are not dropped
+                based on Tesseract confidence (scores ``0``–``100`` and ``-1`` are all kept when other
+                filters pass).
             case_sensitive: Match behavior when ``query`` is set.
             preprocess: If True, apply binarization (Otsu for dark-on-light; strict brightness floor for ``white_text``).
             white_text: If True with ``preprocess``, extract near-white ink (see :data:`_WHITE_TEXT_BRIGHTNESS_FLOOR`) on dark UI.
@@ -828,6 +1149,10 @@ class VisionService:
             cc_min_area / cc_max_area: Blob size limits; default ``None`` uses :meth:`scaled_cc_ink_bounds`.
             brightness_floor: When set with ``white_text`` and ``preprocess``, passed to
                 :meth:`preprocess_bw_ui_text`.
+            roi_upscale: When ``region`` is set and this is ``> 1``, stretch the cropped BGR patch before
+                binarize; OCR boxes scale back to full-frame coords. CC area thresholds scale by ``roi_upscale**2``.
+            ocr_debug_tsv_path: When set, write :func:`pytesseract.image_to_tsv` for the binary passed to Tesseract.
+            ocr_debug_boxes_png_path: When set, draw word-level boxes on the mono image (OCR pixel space).
 
         Returns:
             List of ``OcrWordBox`` in full-screen coordinates (including ROI offset).
@@ -836,52 +1161,21 @@ class VisionService:
             logger.error("pytesseract is not installed; pip install pytesseract and install the Tesseract OCR binary")
             return []
 
-        if screen_img is None or screen_img.size == 0:
+        prep = VisionService._preprocess_ocr_region(
+            screen_img,
+            region,
+            preprocess=preprocess,
+            white_text=white_text,
+            brightness_floor=brightness_floor,
+            cc_filter_blobs=cc_filter_blobs,
+            cc_min_area=cc_min_area,
+            cc_max_area=cc_max_area,
+            roi_upscale=roi_upscale,
+            save_preprocess_png=save_preprocess_png,
+        )
+        if prep is None:
             return []
-
-        full_h, full_w = screen_img.shape[:2]
-
-        offset_x, offset_y = 0, 0
-        work = screen_img
-        if region is not None:
-            rx, ry, rw, rh = region
-            h_s, w_s = screen_img.shape[:2]
-            if rx < 0 or ry < 0 or rx + rw > w_s or ry + rh > h_s:
-                logger.warning(f"OCR region {region} out of bounds for image {w_s}x{h_s}")
-                return []
-            work = screen_img[ry : ry + rh, rx : rx + rw]
-            offset_x, offset_y = rx, ry
-
-        if preprocess:
-            mono = VisionService.preprocess_bw_ui_text(
-                work,
-                white_text=white_text,
-                brightness_floor=brightness_floor,
-            )
-            if cc_filter_blobs:
-                c_lo, c_hi = cc_min_area, cc_max_area
-                if c_lo is None or c_hi is None:
-                    a_lo, a_hi = VisionService.scaled_cc_ink_bounds(full_w, full_h)
-                    if c_lo is None:
-                        c_lo = a_lo
-                    if c_hi is None:
-                        c_hi = a_hi
-                mono = VisionService.filter_binary_ink_by_component_area(
-                    mono,
-                    min_area=int(c_lo),
-                    max_area=int(c_hi),
-                )
-        else:
-            mono = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-
-        if save_preprocess_png is not None:
-            try:
-                ensure_dir(save_preprocess_png.parent)
-                cv2.imwrite(str(save_preprocess_png), mono)
-            except Exception as exc:
-                logger.warning("Could not save OCR preprocess debug PNG: %s", exc)
-
-        pil = Image.fromarray(mono)
+        pil, mono, coord_scale, offset_x, offset_y = prep
         try:
             data = pytesseract.image_to_data(
                 pil, output_type=pytesseract.Output.DICT, config=tesseract_config
@@ -892,6 +1186,17 @@ class VisionService:
                 "(e.g. Windows installer from UB Mannheim)."
             )
             return []
+
+        VisionService.save_hud_ocr_debug_outputs(
+            pil,
+            mono,
+            data,
+            tesseract_config=tesseract_config,
+            tsv_path=ocr_debug_tsv_path,
+            boxes_png_path=ocr_debug_boxes_png_path,
+        )
+
+        _ = min_confidence  # callers still pass it; confidence does not filter tokens
 
         n = len(data.get("text", []))
         qnorm = None
@@ -907,8 +1212,6 @@ class VisionService:
                 conf = int(data["conf"][i])
             except (ValueError, TypeError):
                 conf = -1
-            if conf >= 0 and conf < min_confidence:
-                continue
             if qnorm is not None and not VisionService._ocr_query_matches(
                 raw,
                 qnorm,
@@ -918,10 +1221,11 @@ class VisionService:
             ):
                 continue
 
-            left = int(data["left"][i]) + offset_x
-            top = int(data["top"][i]) + offset_y
-            w = int(data["width"][i])
-            h = int(data["height"][i])
+            inv = 1.0 / coord_scale
+            left = int(round(float(data["left"][i]) * inv)) + offset_x
+            top = int(round(float(data["top"][i]) * inv)) + offset_y
+            w = max(1, int(round(float(data["width"][i]) * inv)))
+            h = max(1, int(round(float(data["height"][i]) * inv)))
             words.append(
                 OcrWordBox(
                     left=left,
@@ -934,8 +1238,9 @@ class VisionService:
             )
         return words
 
-    _TESSERACT_NUMBERS_SPARSE = (
-        "--psm 11 -c tessedit_char_whitelist=0123456789+/:MmHh"
+    # Top-right HUD (three rows): PSM 6 = single uniform text block / multiple lines.
+    _TESSERACT_NUMBERS_HUD = (
+        "--psm 6 -c tessedit_char_whitelist=0123456789l"
     )
     # Same sparse layout as numbers; whitelist restricts to Latin letters only.
     _TESSERACT_LETTERS_SPARSE = (
@@ -1068,6 +1373,7 @@ class VisionService:
         cc_min_area: Optional[int] = None,
         cc_max_area: Optional[int] = None,
         tesseract_config: Optional[str] = None,
+        save_debug_preprocess: bool = False,
     ) -> Optional[Tuple[int, int]]:
         """
         Same pipeline as :meth:`ocr_letters_top_center`, with Tesseract limited to **walWAL** unless
@@ -1075,15 +1381,19 @@ class VisionService:
         contains **wall** (case-insensitive), **lowest on the screen** (largest ``top + height``).
         ``None`` if no such word. Coordinates are the full word box from Tesseract.
 
-        Writes the binarized ROI (same image passed to Tesseract) to
-        ``glyph_debug/wall_find_preprocess.png`` under the app resource root each call.
+        When ``save_debug_preprocess`` is ``True``, writes the binarized ROI to
+        ``glyph_debug/wall_find_preprocess.png`` under the app resource root.
         """
         cfg = (
             VisionService._TESSERACT_WALL_LABEL_SPARSE.strip()
             if tesseract_config is None
             else str(tesseract_config).strip()
         )
-        debug_png = get_resource_path("glyph_debug/wall_find_preprocess.png")
+        debug_png = (
+            get_resource_path("glyph_debug/wall_find_preprocess.png")
+            if save_debug_preprocess
+            else None
+        )
         words = VisionService.ocr_letters_top_center(
             screen_img,
             side=side,
@@ -1148,12 +1458,23 @@ class VisionService:
         return out
 
     @staticmethod
-    def merge_numeric_cluster(cluster: Sequence[OcrWordBox]) -> GroupedNumber:
-        """Sort left-to-right and union bounding boxes into one :class:`GroupedNumber`."""
+    def merge_numeric_cluster(
+        cluster: Sequence[OcrWordBox],
+        *,
+        join_separator: str = " ",
+    ) -> GroupedNumber:
+        """
+        Sort left-to-right and union bounding boxes into one :class:`GroupedNumber`.
+
+        ``join_separator`` defaults to a space (word-level OCR); pass ``""`` when each
+        :class:`OcrWordBox` already holds a single character (e.g. from
+        :meth:`find_chars_ocr`) so digits concatenate into one number.
+        """
         if not cluster:
             return GroupedNumber("", 0, 0, 0, 0, float("nan"))
         parts = sorted(cluster, key=lambda b: b.left)
-        text = " ".join(p.text.strip() for p in parts if p.text.strip())
+        text = join_separator.join(p.text.strip() for p in parts if p.text.strip())
+        text = text.replace("l", "1")
         left = min(p.left for p in parts)
         top = min(p.top for p in parts)
         right = max(p.left + p.width for p in parts)
@@ -1182,51 +1503,90 @@ class VisionService:
         cc_min_area: Optional[int] = None,
         cc_max_area: Optional[int] = None,
         preprocess: bool = True,
+        save_preprocess_png: Optional[Path] = None,
+        roi_upscale: float = HUD_TOP_RIGHT_NUMBERS_ROI_UPSCALE,
+        ocr_debug_box_path: Optional[Path] = None,
+        ocr_debug_boxes_png_path: Optional[Path] = None,
+        psm10_glyph_confidence: bool = False,
+        hud_debug_char_clusters_out: Optional[List[List[OcrWordBox]]] = None,
+        allow_hud_ocr_debug: bool = False,
     ) -> List[GroupedNumber]:
         """
-        **Pipeline:** ROI crop → grayscale via :meth:`preprocess_bw_ui_text` (``white_text``) →
+        **Pipeline:** ROI crop → optional BGR ``roi_upscale`` before binarize → grayscale via :meth:`preprocess_bw_ui_text` (``white_text``) →
         black/white mask inverted to ink on white → optional
         :meth:`filter_binary_ink_by_component_area` (defaults from :meth:`scaled_cc_ink_bounds`) →
-        Tesseract (digit-friendly config) → digit tokens → cluster by line (similar ``y``) → merge.
-
-        OCR digits-focused tokens in ``region``, keep tokens that contain a digit, cluster by
-        similar vertical center (same display line → one number), merge left-to-right.
+        :meth:`find_chars_ocr` (Tesseract :func:`pytesseract.image_to_boxes`, digit-friendly HUD
+        config :data:`_TESSERACT_NUMBERS_HUD`) → digit chars → cluster by line (similar ``y``) →
+        merge each line into one number (no spaces).
 
         ``y_tolerance_px`` defaults to a fraction of ~30 px line height scaled by frame height
         (1600p baseline).
+
+        ``min_confidence`` is accepted for API compatibility but **not used**.
+
+        ``allow_hud_ocr_debug``: when ``False`` (default for the GUI bot), ``save_preprocess_png``,
+        ``ocr_debug_*`` disk paths, ``psm10_glyph_confidence``, and ``hud_debug_char_clusters_out``
+        are ignored so extraction never writes debug artifacts or runs extra passes.
+
+        When ``allow_hud_ocr_debug`` is ``True``:
+
+        ``ocr_debug_box_path`` writes the raw Tesseract ``.box`` text;
+        ``ocr_debug_boxes_png_path`` writes a per-character bbox overlay on the binary ROI.
+
+        ``psm10_glyph_confidence``: optional second Tesseract pass per glyph (see :meth:`find_chars_ocr`).
+        ``hud_debug_char_clusters_out``: when set to an empty mutable list, it is cleared and filled
+        with one inner list per Y-cluster (characters left-to-right) after clustering, for scripts / debug.
         """
+        if not allow_hud_ocr_debug:
+            save_preprocess_png = None
+            ocr_debug_box_path = None
+            ocr_debug_boxes_png_path = None
+            psm10_glyph_confidence = False
+            hud_debug_char_clusters_out = None
+
         if screen_img is None or screen_img.size == 0:
             return []
 
         h_s, w_s = screen_img.shape[:2]
-        cfg = f"{VisionService._TESSERACT_NUMBERS_SPARSE}".strip()
+        cfg = f"{VisionService._TESSERACT_NUMBERS_HUD}".strip()
         if tesseract_config is not None:
             cfg = tesseract_config
 
-        words = VisionService.find_words_ocr(
+        _ = min_confidence  # accepted for API compatibility (no per-char conf from image_to_boxes)
+
+        chars = VisionService.find_chars_ocr(
             screen_img,
             region=region,
-            query=None,
-            min_confidence=min_confidence,
             preprocess=preprocess,
             white_text=white_text,
             tesseract_config=cfg,
             cc_filter_blobs=cc_filter_blobs,
             cc_min_area=cc_min_area,
             cc_max_area=cc_max_area,
+            save_preprocess_png=save_preprocess_png,
+            roi_upscale=roi_upscale,
+            ocr_debug_box_path=ocr_debug_box_path,
+            ocr_debug_boxes_png_path=ocr_debug_boxes_png_path,
+            psm10_glyph_confidence=psm10_glyph_confidence,
         )
-        digit_words = [w for w in words if re.search(r"\d", w.text)]
-        if not digit_words:
+        digit_chars = [c for c in chars if c.text.isdigit() or c.text == "l"]
+        if not digit_chars:
             return []
 
         if y_tolerance_px is None:
-            med_h = float(np.median([w.height for w in digit_words]))
+            med_h = float(np.median([c.height for c in digit_chars]))
             y_tol = max(8.0, med_h * 0.45, float(h_s) * (_NUMBERS_REF_LINE_HEIGHT_PX / 1600.0) * 0.35)
         else:
             y_tol = float(y_tolerance_px)
 
-        clusters = VisionService.cluster_ocr_boxes_by_y(digit_words, y_tol)
-        return [VisionService.merge_numeric_cluster(cl) for cl in clusters]
+        clusters = VisionService.cluster_ocr_boxes_by_y(digit_chars, y_tol)
+        if hud_debug_char_clusters_out is not None:
+            hud_debug_char_clusters_out.clear()
+            for cl in clusters:
+                hud_debug_char_clusters_out.append(sorted(cl, key=lambda b: b.left))
+        return [
+            VisionService.merge_numeric_cluster(cl, join_separator="") for cl in clusters
+        ]
 
     @staticmethod
     def extract_top_right_hud_numbers(
@@ -1240,12 +1600,23 @@ class VisionService:
         cc_min_area: Optional[int] = None,
         cc_max_area: Optional[int] = None,
         preprocess: bool = True,
+        save_preprocess_png: Optional[Path] = None,
+        roi_upscale: float = HUD_TOP_RIGHT_NUMBERS_ROI_UPSCALE,
+        ocr_debug_box_path: Optional[Path] = None,
+        ocr_debug_boxes_png_path: Optional[Path] = None,
+        psm10_glyph_confidence: bool = False,
+        hud_debug_char_clusters_out: Optional[List[List[OcrWordBox]]] = None,
+        allow_hud_ocr_debug: bool = False,
     ) -> List[GroupedNumber]:
         """
         Full **top-right HUD** number pipeline on ``screen_img`` (see
         :meth:`extract_grouped_numbers_in_region`). ROI from :meth:`numbers_hud_roi_top_right`.
 
         Updates :class:`~app.config.Config` capture size / aspect from ``screen_img`` when possible.
+        Default ``roi_upscale`` is :data:`HUD_TOP_RIGHT_NUMBERS_ROI_UPSCALE` (BGR enlargement before binarize).
+
+        ``allow_hud_ocr_debug`` defaults to ``False`` so the GUI bot never enables preprocess saves,
+        ``.box`` / overlay writes, PSM-10 glyph confidence, or cluster dump unless explicitly opted in.
         """
         if screen_img is None or screen_img.size == 0:
             return []
@@ -1264,26 +1635,49 @@ class VisionService:
             cc_min_area=cc_min_area,
             cc_max_area=cc_max_area,
             preprocess=preprocess,
+            save_preprocess_png=save_preprocess_png,
+            roi_upscale=roi_upscale,
+            ocr_debug_box_path=ocr_debug_box_path,
+            ocr_debug_boxes_png_path=ocr_debug_boxes_png_path,
+            psm10_glyph_confidence=psm10_glyph_confidence,
+            hud_debug_char_clusters_out=hud_debug_char_clusters_out,
+            allow_hud_ocr_debug=allow_hud_ocr_debug,
         )
 
     @staticmethod
-    def extract_top_right_hud_numbers_from_window(
-        **kwargs: Any,
-    ) -> List[GroupedNumber]:
+    def parse_loot_amount_from_grouped_text(text: str) -> Optional[int]:
         """
-        Capture the game window and run :meth:`extract_top_right_hud_numbers` (full preprocess +
-        CC filter + Tesseract pipeline). Returns an empty list if the window is missing or
-        screenshot fails.
-        """
-        from app.services.window import WindowService
+        Parse a HUD resource quantity from OCR text (digits only; commas and spaces ignored).
 
-        ws = WindowService()
-        if not ws.hwnd:
-            return []
-        frame = ws.screenshot()
-        if frame is None or frame.size == 0:
-            return []
-        return VisionService.extract_top_right_hud_numbers(frame, **kwargs)
+        Used with :meth:`extract_top_right_hud_numbers` clusters: HUD shows gold / elixir / dark
+        elixir left‑to‑right in the OCR ROI — take clusters sorted by horizontal center for the triplet.
+        """
+        digits = re.sub(r"\D", "", (text or "").strip())
+        if not digits:
+            return None
+        try:
+            return int(digits)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def parse_hud_resources_triplet(groups: List[GroupedNumber]) -> Optional[Tuple[int, int, int]]:
+        """
+        From :meth:`extract_top_right_hud_numbers` clusters, derive ``(gold, elixir, dark_elixir)``
+        assuming the three resource bars read left‑to‑right as the three leftmost decoded numbers.
+        Returns ``None`` if fewer than three numeric clusters are available.
+        """
+        scored: List[Tuple[float, int]] = []
+        for g in groups:
+            v = VisionService.parse_loot_amount_from_grouped_text(g.text)
+            if v is None:
+                continue
+            cx = float(g.left) + float(g.width) * 0.5
+            scored.append((cx, v))
+        scored.sort(key=lambda t: t[0])
+        if len(scored) < 3:
+            return None
+        return scored[0][1], scored[1][1], scored[2][1]
 
     @staticmethod
     def _ocr_confidence_key(w: OcrWordBox) -> float:
@@ -1335,28 +1729,3 @@ class VisionService:
 
         best = max(matches, key=pick_key)
         return best.center
-
-    @staticmethod
-    def find_words_regex(
-        screen_img: np.ndarray,
-        pattern: str,
-        region: Optional[Tuple[int, int, int, int]] = None,
-        *,
-        min_confidence: int = 30,
-        preprocess: bool = True,
-        white_text: bool = False,
-        tesseract_config: str = "--psm 11",
-        flags: int = re.IGNORECASE,
-    ) -> List[OcrWordBox]:
-        """Like :meth:`find_words_ocr` but filter word text with a regex ``pattern``."""
-        all_words = VisionService.find_words_ocr(
-            screen_img,
-            region=region,
-            query=None,
-            min_confidence=min_confidence,
-            preprocess=preprocess,
-            white_text=white_text,
-            tesseract_config=tesseract_config,
-        )
-        rx = re.compile(pattern, flags)
-        return [w for w in all_words if rx.search(w.text)]

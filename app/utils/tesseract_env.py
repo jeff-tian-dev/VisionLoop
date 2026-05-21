@@ -3,12 +3,36 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 from app.utils.logger import setup_logger
 
 logger = setup_logger("TesseractEnv")
+
+
+def _patch_pytesseract_hidden_console() -> None:
+    """Hide the console window when ``tesseract.exe`` is spawned from a GUI / windowed process."""
+    if sys.platform != "win32":
+        return
+    flag = getattr(subprocess, "CREATE_NO_WINDOW", None)
+    if flag is None:
+        return
+    try:
+        import pytesseract.pytesseract as pt
+    except ImportError:
+        return
+
+    _orig = pt.subprocess_args
+
+    def subprocess_args(include_stdout=True):
+        kwargs = _orig(include_stdout)
+        prev = int(kwargs.get("creationflags", 0))
+        kwargs["creationflags"] = prev | flag
+        return kwargs
+
+    pt.subprocess_args = subprocess_args  # type: ignore[method-assign]
 
 
 def _tessdata_dir(install_root: Path) -> Path:
@@ -30,6 +54,8 @@ def configure_tesseract() -> None:
         import pytesseract
     except ImportError:
         return
+
+    _patch_pytesseract_hidden_console()
 
     if os.environ.get("TESSERACT_CMD"):
         cmd = Path(os.environ["TESSERACT_CMD"])

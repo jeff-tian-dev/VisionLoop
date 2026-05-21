@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import subprocess
+import sys
 import threading
 import time
 import winreg
@@ -96,11 +97,16 @@ class HardwareFingerprint:
     @staticmethod
     def _motherboard_serial() -> str:
         try:
+            sub_kw: dict = {
+                "timeout": 5,
+                "stderr": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+                sub_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
             result = subprocess.check_output(
                 ["powershell", "-NoProfile", "-Command",
                  "(Get-CimInstance Win32_BaseBoard).SerialNumber"],
-                timeout=5,
-                stderr=subprocess.DEVNULL,
+                **sub_kw,
             )
             return result.decode(errors="ignore").strip()
         except Exception:
@@ -238,10 +244,6 @@ class LicenseManager:
     @property
     def user_message(self) -> str:
         return _REASON_MESSAGES.get(self.reason, "License key is invalid.")
-
-    @property
-    def is_valid(self) -> bool:
-        return self.state == LicenseState.VALID
 
     @property
     def license_expiry_subcaption(self) -> str:

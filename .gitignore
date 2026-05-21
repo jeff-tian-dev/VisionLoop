@@ -60,4 +60,5 @@ autoloot.log
 glyph_debug/
 glyph_dump_latest.txt
 player_list.json
+settings.json
 build_assets/

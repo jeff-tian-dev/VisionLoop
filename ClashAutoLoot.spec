@@ -1,21 +1,76 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec: run from repo root: python -m PyInstaller --noconfirm ClashAutoLoot.spec"""
+"""
+PyInstaller spec for ClashAutoLoot (Windows one-file).
 
-from PyInstaller.utils.hooks import collect_data_files
+Bundled alongside the app (matches ``app.utils.tesseract_env`` frozen layout):
+  * ``tesseract.exe`` and all sibling ``*.dll`` from the Tesseract install dir
+  * ``tessdata/`` (e.g. ``eng.traineddata``)
 
-block_cipher = None
+Override install path (optional):
 
-# PyInstaller 6 Analysis expects hook-style (src_dir_or_file, dest_dir) tuples, not Tree().
-datas = [
-    ("templates", "templates"),
-    ("build_assets/tesseract", "."),
-    *collect_data_files("customtkinter"),
-]
+    set TESSERACT_ROOT=C:\\Path\\To\\Tesseract-OCR
+    python -m PyInstaller --noconfirm ClashAutoLoot.spec
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+_tess_root = Path(os.environ.get("TESSERACT_ROOT", r"C:\Program Files\Tesseract-OCR"))
+
+binaries: list[tuple[str, str]] = []
+datas: list[tuple[str, str]] = [("templates", "templates")]
+
+
+def _tessdata_datas(tessdata_dir: Path) -> list[tuple[str, str]]:
+    """``Analysis`` expects (src_file, dest_dir) pairs; mirror ``Tree(..., prefix='tessdata')``."""
+    out: list[tuple[str, str]] = []
+    for _f in sorted(tessdata_dir.rglob("*")):
+        if not _f.is_file():
+            continue
+        _rel = _f.relative_to(tessdata_dir)
+        _dest = (
+            "tessdata"
+            if _rel.parent == Path(".")
+            else str(Path("tessdata") / _rel.parent).replace("\\", "/")
+        )
+        out.append((str(_f), _dest))
+    return out
+
+
+if sys.platform == "win32":
+    _tesseract_exe = _tess_root / "tesseract.exe"
+    _tessdata = _tess_root / "tessdata"
+    if not _tesseract_exe.is_file():
+        raise SystemExit(
+            "Cannot bundle Tesseract: missing {!s}\n"
+            "Install UB-Mannheim Tesseract OCR or set TESSERACT_ROOT to that folder.".format(
+                _tesseract_exe
+            )
+        )
+    if not _tessdata.is_dir():
+        raise SystemExit(
+            "Cannot bundle tessdata: missing {!s}\n"
+            "Install Tesseract language data or set TESSERACT_ROOT.".format(_tessdata)
+        )
+
+    binaries.append((str(_tesseract_exe), "."))
+    for _dll in sorted(_tess_root.glob("*.dll")):
+        binaries.append((str(_dll), "."))
+
+    datas.extend(_tessdata_datas(_tessdata))
+else:
+    print(
+        "WARNING: Building on {!s}; Tesseract bundle skipped (Windows-only).".format(sys.platform),
+        file=sys.stderr,
+    )
 
 a = Analysis(
-    ["app/main.py"],
+    ["app\\main.py"],
     pathex=["."],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=[
         "app",
@@ -29,19 +84,15 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
+    optimize=0,
 )
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
-    a.zipfiles,
     a.datas,
     [],
     name="ClashAutoLoot",
