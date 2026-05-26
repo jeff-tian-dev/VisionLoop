@@ -43,7 +43,7 @@ def check_game_window_aspect_for_start(parent=None) -> bool:
     and return False. If probing the window fails unexpectedly, log and return True so the
     bot can still try (matches the old startup skip behavior).
 
-    ``parent`` is passed to :func:`tkinter.messagebox.showerror` when available (e.g. main CTk window).
+    ``parent`` is passed to ``QMessageBox.critical`` when available (e.g. main Qt window).
     """
     try:
         from app.services.window import WindowService
@@ -56,23 +56,13 @@ def check_game_window_aspect_for_start(parent=None) -> bool:
 
     if size is None:
         try:
-            import tkinter as tk
-            from tkinter import messagebox
+            from PySide6.QtWidgets import QMessageBox
 
-            if parent is None:
-                root = tk.Tk()
-                root.withdraw()
-                messagebox.showerror(
-                    "Clash AutoLoot",
-                    "Clash of Clans window not found.\nOpen the game, then press Start.",
-                )
-                root.destroy()
-            else:
-                messagebox.showerror(
-                    "Clash AutoLoot",
-                    "Clash of Clans window not found.\nOpen the game, then press Start.",
-                    parent=parent,
-                )
+            QMessageBox.critical(
+                parent,
+                "Clash AutoLoot",
+                "Clash of Clans window not found.\nOpen the game, then press Start.",
+            )
         except Exception as e:
             logger.error(f"Could not show window-not-found dialog: {e}")
         return False
@@ -82,17 +72,10 @@ def check_game_window_aspect_for_start(parent=None) -> bool:
         return True
 
     try:
-        import tkinter as tk
-        from tkinter import messagebox
+        from PySide6.QtWidgets import QMessageBox
 
         msg = "Aspect ratio not supported (resize the game window to ~16:9 or ~16:10)."
-        if parent is None:
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror("Clash AutoLoot", msg)
-            root.destroy()
-        else:
-            messagebox.showerror("Clash AutoLoot", msg, parent=parent)
+        QMessageBox.critical(parent, "Clash AutoLoot", msg)
     except Exception as e:
         logger.error(
             f"Game window aspect not supported (~{w}x{h}). Could not show dialog: {e}"

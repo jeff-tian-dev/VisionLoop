@@ -13,7 +13,7 @@ A production Windows desktop application that automates Clash of Clans resource 
 
 End-to-end software product:
 
-- **Windows desktop app** — Python / CustomTkinter, packaged as a self-contained `.exe` with PyInstaller (Tesseract bundled; no user install required for the shipped build).
+- **Windows desktop app** — Python / PySide6 (Qt), packaged as a self-contained `.exe` with PyInstaller (Tesseract bundled; no user install required for the shipped build).
 - **Computer vision loop** — real-time OpenCV template matching across two aspect-ratio asset packs, plus a Tesseract OCR pipeline for HUD numbers, builder-menu labels, and account name detection.
 - **Win32 input injection** — synthetic `SendMessage` mouse events sent directly to the game's child HWND, allowing the bot to run while the user is tabbed out.
 - **Commercial licensing backend** — FastAPI service with hardware-bound license key validation, machine fingerprinting via Windows registry + WMI, Stripe webhooks, Postgres, and rate limiting via SlowAPI.
@@ -73,7 +73,7 @@ The `server/` package is a production FastAPI service:
 
 ```
 app/
-├── main.py                  # Entry: Tesseract env → CustomTkinter GUI
+├── main.py                  # Entry: Tesseract env → PySide6 GUI
 ├── config.py                # Aspect detection, data.json loading, coordinate scaling (singleton)
 ├── core/
 │   ├── bot.py               # Attack loop, loot tracking, wall upgrades, multi-run sequencing
@@ -87,10 +87,15 @@ app/
 │   ├── trial.py             # Trial session heartbeat client
 │   └── taskbar_thumb.py     # Windows taskbar thumbnail Start/Stop buttons (DWM API)
 ├── ui/
-│   ├── gui.py               # AutoLootApp (CTk), bot thread, license/trial UI, status line
-│   ├── dialogs.py           # Player list, profile settings, ranked confirm, license key, unpair
-│   ├── widgets.py           # StatusDot, Tooltip, themed card/button helpers
-│   └── theme.py             # Colors, spacing, attack strategy labels
+│   └── qt/                  # PySide6 GUI (sidebar + pages)
+│       ├── app.py           # run_gui() entry
+│       ├── main_window.py   # MainWindow shell, status bar, navigation
+│       ├── bot_controller.py# Bot/license/trial orchestration (Qt signals)
+│       ├── theme.py         # Dark theme tokens + QSS
+│       ├── widgets.py       # Card, StatusDot, ToggleSwitch, buttons
+│       ├── dialogs.py       # Ranked confirm, unpair confirm
+│       ├── taskbar_thumb_qt.py
+│       └── pages/           # Run, Settings, Players, License, Logs
 └── utils/
     ├── common.py            # get_resource_path (dev + frozen), LOCALAPPDATA writable dir
     ├── logger.py            # Rotating file + stderr handler
@@ -127,7 +132,7 @@ templates/
 | Layer | Choice |
 |---|---|
 | Language | Python 3.9+ |
-| GUI | CustomTkinter (CTk wrapping Tk/Tcl) |
+| GUI | PySide6 (Qt 6) |
 | Computer vision | OpenCV (`matchTemplate`, morphology, thresholding) |
 | OCR | Tesseract 5 via pytesseract |
 | Win32 | ctypes — `user32`, `gdi32`, `shcore`, `winreg`, DWM |
@@ -137,7 +142,15 @@ templates/
 | Packaging | PyInstaller (one-file exe, bundled Tesseract) |
 | HTTP client | requests (client), httpx (server) |
 
-Client dependencies (`requirements.txt`): OpenCV, NumPy, Pillow, pytesseract, CustomTkinter, PyInstaller, requests.
+Client dependencies (`requirements.txt`): OpenCV, NumPy, Pillow, pytesseract, PySide6, PyInstaller, requests.
+
+### Build (PyInstaller)
+
+The local `ClashAutoLoot.spec` is not checked into git. When building the `.exe` after the PySide6 migration:
+
+- Remove any `customtkinter` hidden-import / hook entries from the spec.
+- Add PySide6 collection, e.g. `collect_all('PySide6')` or `--collect-submodules PySide6`.
+- Ensure the Qt Windows platform plugin (`qwindows.dll`) is bundled (PyInstaller usually picks this up with `collect_all`).
 
 ---
 

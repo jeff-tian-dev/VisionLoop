@@ -140,17 +140,15 @@ class TaskbarThumb:
         self._stop_icon: Optional[wintypes.HICON] = None
         self._original_wndproc = None
         self._wndproc_ref = None
-        self._root_ref = None
         self._polling = False
         self.hwnd = 0
 
-    def setup(self, root) -> bool:
+    def setup(self, hwnd: int, title: str) -> bool:
         """Initialize toolbar and install message handler. Returns True on success."""
-        self._root_ref = root
         ole32 = ctypes.windll.ole32
         user32 = ctypes.windll.user32
 
-        self.hwnd = self._get_taskbar_hwnd(root, user32)
+        self.hwnd = int(hwnd) if hwnd else 0
         if not self.hwnd:
             logger.warning("Could not find valid HWND for taskbar")
             return False
@@ -173,29 +171,6 @@ class TaskbarThumb:
         self._start_message_hook()
         logger.info("Taskbar thumbnail toolbar initialized (hwnd=%s)", self.hwnd)
         return True
-
-    def _get_taskbar_hwnd(self, root, user32) -> int:
-        """Get the HWND of the window that has the taskbar button. Tries multiple methods."""
-        title = root.title()
-        inner_hwnd = root.winfo_id()
-
-        # 1. FindWindow by title - most reliable for the top-level window with taskbar button
-        hwnd = user32.FindWindowW(None, title)
-        if hwnd:
-            return hwnd
-
-        # 2. GA_ROOTOWNER - gets the root owner (top-level window that owns the hierarchy)
-        hwnd = user32.GetAncestor(inner_hwnd, GA_ROOTOWNER)
-        if hwnd:
-            return hwnd
-
-        # 3. GA_ROOT - root of the window hierarchy
-        hwnd = user32.GetAncestor(inner_hwnd, GA_ROOT)
-        if hwnd:
-            return hwnd
-
-        # 4. Fallback to inner_hwnd
-        return inner_hwnd
 
     def _get_vtable(self):
         """Dereference the COM object to get the vtable (double indirection)."""
@@ -296,14 +271,10 @@ class TaskbarThumb:
         self._original_wndproc = SetWindowLongPtrW(self.hwnd, GWLP_WNDPROC, new_proc)
 
         self._polling = True
-        self._poll_flags()
 
-    def stop_polling(self):
-        self._polling = False
-
-    def _poll_flags(self):
-        """Check the C-level flags set by the wndproc and dispatch on the main thread."""
-        if not self._polling or not self._root_ref:
+    def poll_once(self):
+        """Check the C-level flags set by the wndproc and dispatch callbacks."""
+        if not self._polling:
             return
 
         if self._flag_start.value:
@@ -314,7 +285,27 @@ class TaskbarThumb:
             self._flag_stop.value = 0
             self.on_stop()
 
-        self._root_ref.after(50, self._poll_flags)
+    def teardown(self) -> None:
+        self._polling = False
+        user32 = ctypes.windll.user32
+        try:
+            if self._original_wndproc and self.hwnd:
+                SetWindowLongPtrW = user32.SetWindowLongPtrW
+                SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+                SetWindowLongPtrW.restype = ctypes.c_void_p
+                SetWindowLongPtrW(self.hwnd, GWLP_WNDPROC, self._original_wndproc)
+        except Exception:
+            pass
+        try:
+            if self._taskbar_ptr:
+                vtable = self._get_vtable()
+                release = ctypes.cast(vtable[2], ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p))
+                release(self._taskbar_ptr)
+        except Exception:
+            pass
+        finally:
+            self._taskbar_ptr = None
+            self._original_wndproc = None
 
     def update_buttons(self, running: bool):
         """Enable/disable Start and Stop buttons based on bot state."""

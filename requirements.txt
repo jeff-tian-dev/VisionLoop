@@ -2,6 +2,6 @@ opencv-python
 numpy
 pillow
 pytesseract
-customtkinter
+PySide6>=6.8.0
 pyinstaller
 requests

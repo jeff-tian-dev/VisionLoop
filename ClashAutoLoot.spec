@@ -18,10 +18,33 @@ import os
 import sys
 from pathlib import Path
 
-_tess_root = Path(os.environ.get("TESSERACT_ROOT", r"C:\Program Files\Tesseract-OCR"))
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_dynamic_libs
 
-binaries: list[tuple[str, str]] = []
-datas: list[tuple[str, str]] = [("templates", "templates")]
+_tess_root = Path(os.environ.get("TESSERACT_ROOT", r"C:\Program Files\Tesseract-OCR"))
+_icon = Path("assets/clash_autoloot_logo.ico")
+
+# Only collect the three Qt modules the app actually uses instead of the full PySide6 suite.
+# collect_all("PySide6") pulls in Qt3D, QtCharts, QtWebEngine, QtQml, etc. (~250-300 MB wasted).
+_pyside6_used_modules = ["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets"]
+pyside6_datas: list[tuple[str, str]] = []
+pyside6_binaries: list[tuple[str, str]] = []
+pyside6_hiddenimports: list[str] = []
+for _mod in _pyside6_used_modules:
+    _d, _b, _h = collect_all(_mod)
+    pyside6_datas += _d
+    pyside6_binaries += _b
+    pyside6_hiddenimports += _h
+
+# Also collect shared PySide6 / shiboken6 runtime data and libs.
+pyside6_datas += collect_data_files("PySide6", includes=["*.pyi", "py.typed"])
+pyside6_binaries += collect_dynamic_libs("shiboken6")
+
+binaries: list[tuple[str, str]] = list(pyside6_binaries)
+datas: list[tuple[str, str]] = [
+    ("templates", "templates"),
+    ("assets", "assets"),
+    *pyside6_datas,
+]
 
 
 def _tessdata_datas(tessdata_dir: Path) -> list[tuple[str, str]]:
@@ -75,15 +98,20 @@ a = Analysis(
     hiddenimports=[
         "app",
         "app.ui",
+        "app.ui.qt",
         "app.core",
         "app.services",
         "app.utils",
         "pytesseract",
+        "PySide6.QtCore",
+        "PySide6.QtGui",
+        "PySide6.QtWidgets",
+        *pyside6_hiddenimports,
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["customtkinter", "tkinter"],
     noarchive=False,
     optimize=0,
 )
@@ -108,4 +136,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(_icon) if _icon.is_file() else None,
 )

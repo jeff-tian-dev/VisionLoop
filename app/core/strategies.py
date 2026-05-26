@@ -17,6 +17,14 @@ _EARTHQUAKE_REGION_ARC_SAMPLES = 49
 # (0 = bottom edge, denominator = top edge). Image y increases downward.
 _EARTHQUAKE_RANDOM_LINE_FROM_BOTTOM = (4, 10)
 
+_EDRAG_COUNT = 12
+_EDRAG_DELAY = 0.2
+_EDRAG_CORNER_MARGIN = 100
+_DIAMOND_EDGES = (
+    ("left", "top"),
+    ("top", "right"),
+)
+
 
 class AttackStrategy:
     """Base class for attack strategies."""
@@ -296,6 +304,56 @@ class AttackStrategy:
             for cx, cy in points
         ]
 
+    def _random_diamond_perimeter_point(self, frame) -> Tuple[int, int]:
+        c1, c2 = random.choice(_DIAMOND_EDGES)
+        x1, y1 = self._point(c1)
+        x2, y2 = self._point(c2)
+        edge_len = math.hypot(x2 - x1, y2 - y1)
+        if edge_len <= 2 * _EDRAG_CORNER_MARGIN:
+            t = 0.5
+        else:
+            t_min = _EDRAG_CORNER_MARGIN / edge_len
+            t_max = 1.0 - t_min
+            t = random.uniform(t_min, t_max)
+        xf = x1 + (x2 - x1) * t
+        yf = y1 + (y2 - y1) * t
+        fh, fw = frame.shape[:2]
+        return self._quantize_deploy_to_frame(xf, yf, fw, fh)
+
+    def _deploy_diamond_perimeter_troop(
+        self,
+        frame,
+        template_name: str,
+        stop_event=None,
+        *,
+        count: int = _EDRAG_COUNT,
+        delay: float = _EDRAG_DELAY,
+    ) -> bool:
+        """Select troop in the bottom bar and click ``count`` points on the diamond perimeter."""
+        ev = stop_event or self.stop_event
+        roi = self.vision.bottom_half_region(frame)
+        tx, ty = self.vision.find_template(frame, template_name, region=roi)
+        if tx is None:
+            return False
+
+        self.input.click(tx, ty, pause=0.3, rand=False)
+        if ev and ev.wait(0.2):
+            return True
+
+        for _ in range(count):
+            if ev and ev.is_set():
+                return True
+            px, py = self._random_diamond_perimeter_point(frame)
+            self.input.click(px, py, pause=delay, rand=False)
+        return True
+
+    def deploy_golden_drags_if_present(self, frame, stop_event=None) -> bool:
+        """Optional Super Dragon deploy after main troops, before heroes."""
+        ev = stop_event or self.stop_event
+        if self._deploy_diamond_perimeter_troop(frame, "goldendrag.png", ev):
+            logger.info("Deployed golden dragons")
+        return bool(ev and ev.is_set())
+
     def deploy_spells(self, frame):
         self._sync_frame_size(frame)
         roi = self.vision.bottom_half_region(frame)
@@ -424,6 +482,57 @@ class TroopSpamStrategy(AttackStrategy):
         frame = self.input.window_service.screenshot()
         if frame is not None:
             self._sync_frame_size(frame)
+            if self.deploy_golden_drags_if_present(frame, ev):
+                return True
+
+            self.deploy_heroes(frame)
+
+            if ev and ev.is_set():
+                return True
+
+            frame = self.input.window_service.screenshot()
+            if frame is not None:
+                self._sync_frame_size(frame)
+                self.deploy_spells(frame)
+        return True
+
+
+class EdragStrategy(AttackStrategy):
+    def __init__(
+        self,
+        input_service,
+        vision_service,
+        config,
+        stop_event,
+        status_callback=None,
+        earthquake_method: str = EARTHQUAKE_METHOD_CURVE,
+    ):
+        super().__init__(
+            input_service, vision_service, config, stop_event, earthquake_method=earthquake_method
+        )
+        self.status_callback = status_callback
+
+    def execute(self, frame, stop_event=None):
+        ev = stop_event or self.stop_event
+        self._sync_frame_size(frame)
+        logger.info("Executing edrag strategy")
+
+        if not self._deploy_diamond_perimeter_troop(frame, "edrag.png", ev):
+            msg = "Troop edrag not found!"
+            logger.warning(msg)
+            if self.status_callback:
+                self.status_callback(msg)
+            return False
+
+        if ev and ev.is_set():
+            return True
+
+        frame = self.input.window_service.screenshot()
+        if frame is not None:
+            self._sync_frame_size(frame)
+            if self.deploy_golden_drags_if_present(frame, ev):
+                return True
+
             self.deploy_heroes(frame)
 
             if ev and ev.is_set():

@@ -4,7 +4,7 @@ import threading
 from typing import Callable, List, Optional, Tuple
 
 from app.config import ASPECT_16_10, ASPECT_16_9, Config
-from app.core.strategies import TroopSpamStrategy
+from app.core.strategies import EdragStrategy, TroopSpamStrategy
 from app.services.input import InputService
 from app.services.vision import (
     BOTTOM_HALF_BOT_TEMPLATES,
@@ -572,6 +572,15 @@ class Bot:
                 self.stop_event,
                 "valkyrie",
                 5.5,
+                status_callback=cb,
+                earthquake_method=eq,
+            )
+        elif method_id == 4:
+            return EdragStrategy(
+                self.input,
+                self.vision,
+                self.config,
+                self.stop_event,
                 status_callback=cb,
                 earthquake_method=eq,
             )

@@ -5,7 +5,7 @@ from multiprocessing import freeze_support
 # Ensure project root is on sys.path so "app" package is importable from anywhere
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.ui.gui import run_gui
+from app.ui.qt.app import run_gui
 from app.utils.logger import setup_logger
 from app.utils.tesseract_env import configure_tesseract
 
