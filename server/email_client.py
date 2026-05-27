@@ -63,37 +63,48 @@ def _build_html(
 <head>
   <meta charset="UTF-8">
   <title>Your Clash Auto Loot license</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; background: #0f0f0f; color: #e0e0e0; margin: 0; padding: 0; }}
-    .container {{ max-width: 560px; margin: 40px auto; background: #1a1a1a; border-radius: 8px; padding: 32px; }}
-    h1 {{ color: #f0a500; font-size: 22px; margin-bottom: 8px; }}
-    .key-box {{ background: #2a2a2a; border: 1px solid #444; border-radius: 6px;
-                padding: 16px; text-align: center; font-size: 20px; font-family: monospace;
-                letter-spacing: 2px; color: #f0f0f0; margin: 24px 0; }}
-    p {{ line-height: 1.6; font-size: 14px; }}
-    .footer {{ font-size: 12px; color: #666; margin-top: 24px; border-top: 1px solid #333; padding-top: 16px; }}
-    a {{ color: #f0a500; }}
-  </style>
 </head>
-<body>
-  <div class="container">
-    <h1>Thank you for your purchase!</h1>
-    <p>Your <strong>Clash Auto Loot</strong> license key:</p>
-    <div class="key-box">{license_key}</div>
-    {extra}
-    <p><strong>How to activate:</strong></p>
-    <ol>
-      <li>Open <strong>Clash Auto Loot</strong>.</li>
-      <li>Paste your license key into the <em>License Key</em> field.</li>
-      <li>Click <strong>Activate</strong> — the indicator turns green when valid.</li>
-    </ol>
-    <p>The key is bound to the first machine it is activated on. If you ever need to
-    transfer it to a new machine, contact support.</p>
-    <div class="footer">
-      Need help? Email us at <a href="mailto:{support_email}">{support_email}</a>.<br>
-      Please keep this key private — do not share it with others.
-    </div>
-  </div>
+<body style="margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f5;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;padding:32px;max-width:560px;">
+          <tr>
+            <td>
+              <h1 style="color:#c97a00;font-size:22px;margin:0 0 8px 0;">Thank you for your purchase!</h1>
+              <p style="color:#1a1a1a;font-size:14px;line-height:1.6;margin:0 0 8px 0;">
+                Your <strong>Clash Auto Loot</strong> license key:
+              </p>
+              <div style="background-color:#f0f0f0;border:1px solid #cccccc;border-radius:6px;
+                          padding:16px;text-align:center;font-size:20px;font-family:monospace;
+                          letter-spacing:2px;color:#111111;margin:24px 0;">
+                {license_key}
+              </div>
+              <div style="color:#1a1a1a;font-size:14px;line-height:1.6;">
+                {extra}
+              </div>
+              <p style="color:#1a1a1a;font-size:14px;line-height:1.6;margin:16px 0 4px 0;">
+                <strong>How to activate:</strong>
+              </p>
+              <ol style="color:#1a1a1a;font-size:14px;line-height:1.8;margin:0 0 16px 0;padding-left:20px;">
+                <li>Open <strong>Clash Auto Loot</strong>.</li>
+                <li>Go to the <em>License</em> tab and paste your key.</li>
+                <li>Click <strong>Check Key</strong> — the indicator turns green when valid.</li>
+              </ol>
+              <p style="color:#1a1a1a;font-size:14px;line-height:1.6;margin:0 0 24px 0;">
+                The key is bound to the first machine it is activated on. If you ever need to
+                transfer it to a new machine, contact support.
+              </p>
+              <div style="font-size:12px;color:#666666;border-top:1px solid #e0e0e0;padding-top:16px;">
+                Need help? Email us at <a href="mailto:{support_email}" style="color:#c97a00;">{support_email}</a>.<br>
+                Please keep this key private — do not share it with others.
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
 </body>
 </html>"""
 

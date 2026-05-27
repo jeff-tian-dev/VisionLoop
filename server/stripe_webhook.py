@@ -64,28 +64,68 @@ def _payment_intent_id_from_session(session: dict) -> str | None:
     return None
 
 
+def _extract_current_period_end(sub_obj: object) -> int | None:
+    """Return current_period_end as a Unix timestamp from a subscription object or dict.
+
+    Stripe API >= 2026-04-22.dahlia moved current_period_end from the top-level
+    subscription object to items.data[0].current_period_end.  We check both
+    locations so the code works across API versions.
+    """
+    # Top-level (older API / some webhook shapes still include it here)
+    if isinstance(sub_obj, dict):
+        ts = sub_obj.get("current_period_end")
+    else:
+        ts = getattr(sub_obj, "current_period_end", None)
+    if ts is not None:
+        return int(ts)
+
+    # New API: items.data[0].current_period_end
+    try:
+        if isinstance(sub_obj, dict):
+            items = sub_obj.get("items") or {}
+            data = items.get("data") if isinstance(items, dict) else None
+        else:
+            items = getattr(sub_obj, "items", None)
+            data = getattr(items, "data", None) if items is not None else None
+
+        if isinstance(data, list) and data:
+            first = data[0]
+            item_ts = (
+                first.get("current_period_end")
+                if isinstance(first, dict)
+                else getattr(first, "current_period_end", None)
+            )
+            if item_ts is not None:
+                return int(item_ts)
+    except Exception:
+        pass
+
+    return None
+
+
 def _fetch_subscription_period_end_iso(subscription_id: str) -> str | None:
-    sub = stripe.Subscription.retrieve(subscription_id)
-    ts = getattr(sub, "current_period_end", None)
+    sub = stripe.Subscription.retrieve(subscription_id, expand=["items"])
+    ts = _extract_current_period_end(sub)
     if ts is None:
         return None
-    return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
 def _period_end_iso_from_sub_dict(sub: dict) -> str | None:
-    ts = sub.get("current_period_end")
+    ts = _extract_current_period_end(sub)
     if ts is None:
         return None
-    return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
 def _expires_iso_from_deleted_sub(sub: dict) -> str:
     """End access at Stripe's ended_at, else current_period_end, else now."""
     ended = sub.get("ended_at")
-    period_end = sub.get("current_period_end")
-    ts = ended or period_end
+    if ended is not None:
+        return datetime.fromtimestamp(int(ended), tz=timezone.utc).isoformat()
+    ts = _extract_current_period_end(sub)
     if ts is not None:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
     return datetime.now(timezone.utc).isoformat()
 
 

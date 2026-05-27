@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.license import LicenseState, load_saved_key
-from app.ui.qt._constants import MONTH_EXTEND_CHECKOUT_URL, STRIPE_LIFETIME_URL
+from app.ui.qt._constants import MONTH_EXTEND_CHECKOUT_URL, STRIPE_LIFETIME_URL, SUBSCRIBE_CHECKOUT_URL
 from app.ui.qt.bot_controller import BotController
 from app.ui.qt.dialogs import UnpairConfirmDialog, show_error
 from app.ui.qt.theme import SPACING, TOKENS
@@ -85,7 +85,10 @@ class LicensePage(QWidget):
         layout.addLayout(key_row)
 
         footer = QHBoxLayout()
-        self._btn_monthly = primary_button("Buy / extend subscription", parent=self)
+        self._btn_subscribe = primary_button("Buy subscription", parent=self)
+        self._btn_subscribe.clicked.connect(self._open_subscribe_checkout)
+        footer.addWidget(self._btn_subscribe)
+        self._btn_monthly = neutral_button("Buy months (one-time)", parent=self)
         self._btn_monthly.clicked.connect(self._open_monthly_checkout)
         footer.addWidget(self._btn_monthly)
         self._btn_lifetime = neutral_button("Buy lifetime", parent=self)
@@ -188,6 +191,18 @@ class LicensePage(QWidget):
         self._show_plain = visible
         self._entry.setEchoMode(QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password)
         self._eye_btn.setToolTip("Hide password" if visible else "Show password")
+
+    def _open_subscribe_checkout(self) -> None:
+        url = (SUBSCRIBE_CHECKOUT_URL or "").strip()
+        if not url:
+            QMessageBox.information(
+                self.window(),
+                "Monthly subscription",
+                "The subscription checkout URL is not set in this build yet.\n\n"
+                "Contact support to purchase.",
+            )
+            return
+        webbrowser.open(url)
 
     def _open_lifetime_checkout(self) -> None:
         url = (STRIPE_LIFETIME_URL or "").strip()

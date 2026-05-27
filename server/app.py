@@ -159,6 +159,40 @@ async def checkout_month_extend(request: Request) -> RedirectResponse:
     return RedirectResponse(url=url, status_code=302)
 
 
+@app.get("/v1/checkout/subscribe")
+@limiter.limit("10/minute")
+async def checkout_subscribe(request: Request) -> RedirectResponse:
+    """Create a Stripe Checkout Session for a monthly recurring subscription and redirect."""
+    settings = get_settings()
+    price_id = (settings.stripe_subscription_price_id or "").strip()
+    if not price_id:
+        raise HTTPException(status_code=503, detail="subscription_price_not_configured")
+
+    def create_session():
+        return stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price": price_id, "quantity": 1}],
+            success_url="https://clashautoloot.duckdns.org/?paid=subscribe",
+            cancel_url="https://clashautoloot.duckdns.org/?cancel=subscribe",
+            allow_promotion_codes=True,
+        )
+
+    try:
+        session = await asyncio.to_thread(create_session)
+    except stripe.StripeError as exc:
+        logger.exception("Stripe Session.create(subscribe) failed: %s", exc)
+        raise HTTPException(status_code=502, detail="stripe_error")
+
+    url = getattr(session, "url", None) or (
+        session.get("url") if isinstance(session, dict) else None
+    )
+    if not url:
+        logger.error("Checkout session missing url (subscribe)")
+        raise HTTPException(status_code=502, detail="missing_checkout_url")
+
+    return RedirectResponse(url=url, status_code=302)
+
+
 @app.get("/v1/checkout/lifetime")
 @limiter.limit("10/minute")
 async def checkout_lifetime(request: Request) -> RedirectResponse:
