@@ -58,6 +58,8 @@ class Bot:
         ranked_fill: bool = False,
         upgrade_walls: bool = False,
         earthquake_method: str = EARTHQUAKE_METHOD_CURVE,
+        builder_base: bool = False,
+        loot_prioritise: str = "both",
     ):
         """Starts the bot loop. With ``multi_run_players``, runs a full session per enabled player."""
         self._status_callback = status_callback
@@ -75,10 +77,13 @@ class Bot:
 
         duration = 900 if star_bonus else run_time_minutes * 60  # 15 min hard cap for star bonus
         mr = multi_run_players is not None
+        self._builder_base = builder_base
+        self._loot_prioritise = loot_prioritise
         logger.info(
             f"Bot started. Method: {method}, Time: {run_time_minutes}m, "
             f"StarBonus: {star_bonus}, MultiRun: {mr}, RankedFill: {ranked_fill}, "
-            f"UpgradeWalls: {upgrade_walls}, Earthquake: {earthquake_method}"
+            f"UpgradeWalls: {upgrade_walls}, Earthquake: {earthquake_method}, "
+            f"BuilderBase: {builder_base}, LootPrioritise: {loot_prioritise}"
         )
 
         try:
@@ -220,6 +225,21 @@ class Bot:
                 return x, y
         return None, None
 
+    def _wall_menu_scroll_point(self) -> Optional[Tuple[int, int]]:
+        """Wheel anchor over the builder upgrade list (same X column as drag retry)."""
+        pair = _WALL_OCR_RETRY_DRAG_BASELINE.get(self.config.aspect_key)
+        if pair is None:
+            logger.warning(
+                "wall menu scroll: unknown aspect %r; skipping scroll",
+                self.config.aspect_key,
+            )
+            return None
+        p1_ref, p2_ref = pair
+        x_ref = p1_ref[0]
+        y_ref = (p1_ref[1] + p2_ref[1]) // 2
+        pt = self.config.scale_point([x_ref, y_ref])
+        return int(pt[0]), int(pt[1])
+
     def _wall_menu_drag_retry_nudge(self) -> None:
         """Vertical drag in the builder list when ``wall`` OCR misses (~0.5s eased move + hold pause)."""
         pair = _WALL_OCR_RETRY_DRAG_BASELINE.get(self.config.aspect_key)
@@ -249,25 +269,21 @@ class Bot:
         if frame is None:
             return False
         self._update_config_size(frame)
-        gx, gy = self.vision.find_template(frame, "hgoldfull.png")
-        ex, ey = self.vision.find_template(frame, "helixirfull.png")
+        gx, gy = self.vision.find_template(frame, "hgoldfull.png", threshold=0.85)
+        ex, ey = self.vision.find_template(frame, "helixirfull.png", threshold=0.85)
         return gx is not None or ex is not None
 
     def _upgrade_walls_pick_resource_and_okay(self) -> None:
-        """Fresh frame → redness → click affordable upgrade icon → Okay (full-frame template match)."""
+        """Fresh frame → redness above multiupgrade → click affordable slot → Okay."""
         frame = self.window.screenshot()
         if frame is None:
             return
         self._update_config_size(frame)
         pair = VisionService.upgrade_cost_redness_by_resource_icons(frame)
-        if pair.gold.redness < 0.1:
-            ix, iy = self.vision.find_template(frame, "upgradegold.png")
-            if ix:
-                self.input.click(ix, iy, pause=0.3)
-        elif pair.elixir.redness < 0.1:
-            ix, iy = self.vision.find_template(frame, "upgradeelixir.png")
-            if ix:
-                self.input.click(ix, iy, pause=0.3)
+        if pair.gold.redness < 0.2 and pair.gold.center:
+            self.input.click(*pair.gold.center, pause=0.3)
+        elif pair.elixir.redness < 0.2 and pair.elixir.center:
+            self.input.click(*pair.elixir.center, pause=0.3)
 
         frame = self.window.screenshot()
         if frame is None:
@@ -278,7 +294,7 @@ class Bot:
             self.input.click(ox, oy, pause=0.3)
 
     def _upgrade_walls(self) -> None:
-        """Open builder menu, scroll to Wall, run Upgrade More → add-wall loop → optional remove + Okay."""
+        """Open builder menu, scroll to Wall, add walls → remove if both red → Okay."""
         frame = self.window.screenshot()
         if frame is None:
             return
@@ -288,14 +304,16 @@ class Bot:
         if not bx:
             return
         self.input.click(bx, by, pause=0.4)
-        offset = self.config.scale_scalar(300)
-        sy_scroll = by + offset
-        self.input.move(bx, sy_scroll)
+        scroll_pt = self._wall_menu_scroll_point()
+        if not scroll_pt:
+            return
+        sx, sy_scroll = scroll_pt
+        self.input.move(sx, sy_scroll)
         deadline = time.time() + 3.0
         while time.time() < deadline:
             self._check_stop()
             # scroll amount must be positive (see InputService.scroll range(amount))
-            self.input.scroll(bx, sy_scroll, 3)
+            self.input.scroll(sx, sy_scroll, 3)
             if self.stop_event.wait(0.1):
                 return
 
@@ -315,7 +333,7 @@ class Bot:
                     return
         if not wall_pt:
             return
-        self.input.click(*wall_pt, pause=0.4)
+        self.input.click(*wall_pt, pause=0.6)
 
         frame = self.window.screenshot()
         if frame is None:
@@ -329,46 +347,50 @@ class Bot:
             return
         self.input.click(umx, umy, pause=0.4)
 
-        both_red = False
-        addwall_missing_while_affordable = False
+        # Add walls while at least one cost is affordable.
         while True:
             self._check_stop()
             frame = self.window.screenshot()
             if frame is None:
-                break
+                return
             self._update_config_size(frame)
             pair = VisionService.upgrade_cost_redness_by_resource_icons(frame)
             gold_red = pair.gold.redness
             elixir_red = pair.elixir.redness
-            if gold_red < 0.1 or elixir_red < 0.1:
+            if gold_red < 0.2 or elixir_red < 0.2:
                 bot_roi = VisionService.bottom_half_region(frame)
-                awx, awy = self.vision.find_template(
-                    frame, "addwall.png", region=bot_roi
+                awx, awy = VisionService.find_active_over_disabled_template(
+                    frame, "addwall.png", "addwallfake.png", region=bot_roi, threshold=0.6
                 )
                 if awx:
                     self.input.click(awx, awy, pause=0.3)
                 else:
-                    addwall_missing_while_affordable = True
-                    break
+                    self._upgrade_walls_pick_resource_and_okay()
+                    return
             else:
-                both_red = True
                 break
 
-        if both_red:
+        # Both red: keep removing until affordable or remove button gone (no more add-wall).
+        while True:
+            self._check_stop()
             frame = self.window.screenshot()
             if frame is None:
                 return
             self._update_config_size(frame)
-            bot_roi = VisionService.bottom_half_region(frame)
-            rwx, rwy = self.vision.find_template(
-                frame, "removewall.png", region=bot_roi
-            )
-            if rwx:
-                self.input.click(rwx, rwy, pause=0.4)
+            pair = VisionService.upgrade_cost_redness_by_resource_icons(frame)
+            if pair.gold.redness < 0.2 or pair.elixir.redness < 0.2:
+                self._upgrade_walls_pick_resource_and_okay()
+                return
 
-            self._upgrade_walls_pick_resource_and_okay()
-        elif addwall_missing_while_affordable:
-            self._upgrade_walls_pick_resource_and_okay()
+            bot_roi = VisionService.bottom_half_region(frame)
+            rwx, rwy = VisionService.find_active_over_disabled_template(
+                frame, "removewall.png", "removewallfake.png", region=bot_roi, threshold=0.7
+            )
+            if not rwx:
+                self._upgrade_walls_pick_resource_and_okay()
+                return
+
+            self.input.click(rwx, rwy, pause=0.4)
 
     def _dismiss_okay_or_exit_on_frame(self, frame) -> bool:
         """If ``okay.png`` or ``exit.png`` is visible (full frame), click it. Returns True if dismissed."""

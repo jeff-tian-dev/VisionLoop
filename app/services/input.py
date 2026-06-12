@@ -36,6 +36,28 @@ class InputService:
         xc, yc = self._clamp_to_capture(x, y)
         return (yc << 16) | (xc & 0xFFFF)
 
+    def _client_to_screen(self, x: int, y: int) -> Tuple[int, int]:
+        """Map capture/client coords to screen coords for ``WM_MOUSEWHEEL``."""
+        hwnd = self.window_service.hwnd
+        if not hwnd:
+            return self._clamp_to_capture(x, y)
+
+        xc, yc = self._clamp_to_capture(x, y)
+
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        pt = POINT(xc, yc)
+        if not self.user32.ClientToScreen(hwnd, ctypes.byref(pt)):
+            return xc, yc
+        return int(pt.x), int(pt.y)
+
+    def _make_wheel_lparam(self, screen_x: int, screen_y: int) -> int:
+        """``WM_MOUSEWHEEL`` lParam uses signed screen coordinates."""
+        sx = int(screen_x) & 0xFFFF
+        sy = int(screen_y) & 0xFFFF
+        return (sy << 16) | sx
+
     def click(self, x: int, y: int, pause: float = 1.0, rand: bool = True):
         """Performs a click with optional randomization and delay."""
         if rand:
@@ -126,7 +148,8 @@ class InputService:
 
         delta = int(WHEEL_DELTA if upward else -WHEEL_DELTA)
         wparam = delta << 16
-        lparam = self._make_lparam(x, y)
+        sx, sy = self._client_to_screen(x, y)
+        lparam = self._make_wheel_lparam(sx, sy)
 
         for _ in range(amount):
             self.user32.SendMessageW(hwnd, WM_MOUSEWHEEL, wparam, lparam)

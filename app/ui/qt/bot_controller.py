@@ -130,6 +130,8 @@ class BotController(QObject):
         ranked_fill: bool,
         upgrade_walls: bool,
         multi_run_players: Optional[List[PlayerEntry]],
+        builder_base: bool = False,
+        loot_prioritise: str = "both",
     ) -> None:
         if self.is_running():
             return
@@ -150,6 +152,8 @@ class BotController(QObject):
                     ranked_fill=ranked_fill,
                     upgrade_walls=upgrade_walls,
                     earthquake_method=load_profile_settings().earthquake_method,
+                    builder_base=builder_base,
+                    loot_prioritise=loot_prioritise,
                 )
             except Exception as exc:
                 error_msg = str(exc)

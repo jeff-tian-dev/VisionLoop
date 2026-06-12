@@ -35,7 +35,35 @@ def resolve_aspect_key(width: int, height: int) -> Optional[str]:
     return ASPECT_16_9 if d9 < d10 else ASPECT_16_10
 
 
-def check_game_window_aspect_for_start(parent=None) -> bool:
+def _show_window_not_found_dialog(parent, on_configure) -> None:
+    """Window-not-found error with an optional 'Open configuration' shortcut.
+
+    When the user clicks 'Open configuration', ``on_configure`` is invoked (e.g. navigate to
+    Settings → Game window) so they can pick the correct window manually.
+    """
+    try:
+        from PySide6.QtWidgets import QMessageBox
+
+        box = QMessageBox(parent)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Clash AutoLoot")
+        box.setText("Clash of Clans window not found.\nOpen the game, then press Start.")
+        box.setInformativeText(
+            "If the game is already open, choose the correct window manually in "
+            "Settings → Game window."
+        )
+        config_btn = None
+        if on_configure is not None:
+            config_btn = box.addButton("Open configuration", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if config_btn is not None and box.clickedButton() is config_btn:
+            on_configure()
+    except Exception as e:
+        logger.error(f"Could not show window-not-found dialog: {e}")
+
+
+def check_game_window_aspect_for_start(parent=None, on_configure=None) -> bool:
     """
     Validate the Clash window before farming starts.
 
@@ -43,7 +71,8 @@ def check_game_window_aspect_for_start(parent=None) -> bool:
     and return False. If probing the window fails unexpectedly, log and return True so the
     bot can still try (matches the old startup skip behavior).
 
-    ``parent`` is passed to ``QMessageBox.critical`` when available (e.g. main Qt window).
+    ``parent`` is passed to ``QMessageBox`` when available (e.g. main Qt window). ``on_configure``
+    is an optional callback used by the window-not-found dialog's 'Open configuration' button.
     """
     try:
         from app.services.window import WindowService
@@ -55,16 +84,7 @@ def check_game_window_aspect_for_start(parent=None) -> bool:
         return True
 
     if size is None:
-        try:
-            from PySide6.QtWidgets import QMessageBox
-
-            QMessageBox.critical(
-                parent,
-                "Clash AutoLoot",
-                "Clash of Clans window not found.\nOpen the game, then press Start.",
-            )
-        except Exception as e:
-            logger.error(f"Could not show window-not-found dialog: {e}")
+        _show_window_not_found_dialog(parent, on_configure)
         return False
 
     w, h = size

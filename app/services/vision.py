@@ -42,10 +42,11 @@ _NUMBERS_HUD_ROI_AT_BASELINE: Dict[str, Tuple[int, int]] = {
     ASPECT_16_10: (600, 400),  # 2560×1600
     ASPECT_16_9: (550, 350),  # 2560×1440
 }
-# Cost digits sit just left of the upgrade gold/elixir icons (baseline width × height).
-_UPGRADE_COST_LEFT_OF_ICON_ROI_AT_BASELINE: Dict[str, Tuple[int, int]] = {
-    ASPECT_16_10: (150, 40),  # 2560×1600
-    ASPECT_16_9: (150, 40),  # 2560×1440
+# Redness ROI above each ``multiupgrade.png`` slot: center-to-center offset, width × height.
+# Authored at :data:`app.config.ASPECT_BASELINE` (16:9 values from 2560×1440).
+_MULTIUPGRADE_COST_REDNESS_ABOVE_AT_BASELINE: Dict[str, Tuple[int, int, int]] = {
+    ASPECT_16_9: (43, 80, 18),  # tpl_center→roi_center px, roi_w, roi_h @ 2560×1440
+    ASPECT_16_10: (49, 80, 24),  # tpl_center→roi_center px, roi_w, roi_h @ 2560×1600
 }
 # ~cap height in px at 1600p for default Y-cluster tolerance scaling.
 _NUMBERS_REF_LINE_HEIGHT_PX = 30
@@ -72,13 +73,14 @@ class GroupedNumber:
 
 @dataclass(frozen=True)
 class UpgradeCostIconRedness:
-    """Gold or elixir upgrade icon match + how red the cost digits immediately left appear."""
+    """Gold or elixir slot from ``multiupgrade.png`` + redness in the cost box above it."""
 
     template: str
     found: bool
     match_confidence: float
     redness: float
     cost_roi_xywh: Optional[Tuple[int, int, int, int]]
+    center: Optional[Tuple[int, int]] = None
 
 
 @dataclass(frozen=True)
@@ -101,7 +103,9 @@ BOTTOM_HALF_BOT_TEMPLATES = frozenset(
         "endbattle.png",
         "settings.png",
         "addwall.png",
+        "addwallfake.png",
         "removewall.png",
+        "removewallfake.png",
         "upgrademore.png",
     }
 )
@@ -117,7 +121,7 @@ TOP_HALF_BOT_TEMPLATES = frozenset(
 
 
 # Pixels with gray >= this are treated as light-on-dark UI ink when ``white_text=True``.
-_WHITE_TEXT_BRIGHTNESS_FLOOR = 220
+_WHITE_TEXT_BRIGHTNESS_FLOOR = 190
 
 # Connected-component ink area limits at :data:`app.config.ASPECT_BASELINE` resolution per aspect.
 _CC_INK_AREA_AT_BASELINE: Dict[str, Tuple[int, int]] = {
@@ -134,7 +138,7 @@ _TOP_CENTER_MENU_SQUARE_SIDE_AT_BASELINE: Dict[str, int] = {
 # Keep-range for CC ink in :meth:`ocr_letters_top_center` / wall-label OCR at baseline (not HUD).
 _WALL_MENU_LETTER_CC_AT_BASELINE: Dict[str, Tuple[int, int]] = {
     ASPECT_16_10: (40, 400),  # 2560×1600 — drop blobs < 40 or > 400 px²
-    ASPECT_16_9: (35, 350),  # 2560×1440
+    ASPECT_16_9: (30, 350),  # 2560×1440
 }
 
 
@@ -289,10 +293,99 @@ class VisionService:
             return None, None, 0.0
 
     @staticmethod
-    def scaled_upgrade_cost_left_roi_size(screen_w: int, screen_h: int) -> Tuple[int, int]:
+    def _template_best_match(
+        screen_img: np.ndarray,
+        template_name: str,
+        region: Optional[Tuple[int, int, int, int]] = None,
+    ) -> Tuple[float, Optional[int], Optional[int]]:
+        """Best ``TM_CCOEFF_NORMED`` score and match center ``(x, y)``, or ``(0.0, None, None)``."""
+        try:
+            template_path = str(get_template_path(template_name))
+            template = cv2.imread(template_path)
+            if template is None:
+                logger.error(f"Template not found: {template_path}")
+                return 0.0, None, None
+            template = VisionService._resize_template_for_screen(template, screen_img)
+
+            if region:
+                x, y, w, h = region
+                h_screen, w_screen = screen_img.shape[:2]
+                if x + w > w_screen or y + h > h_screen:
+                    return 0.0, None, None
+                search_img = screen_img[y : y + h, x : x + w]
+                offset_x, offset_y = x, y
+            else:
+                search_img = screen_img
+                offset_x, offset_y = 0, 0
+
+            t_h, t_w = template.shape[:2]
+            s_h, s_w = search_img.shape[:2]
+            if t_w > s_w or t_h > s_h:
+                return 0.0, None, None
+
+            result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            center_x = offset_x + max_loc[0] + t_w // 2
+            center_y = offset_y + max_loc[1] + t_h // 2
+            return float(max_val), center_x, center_y
+        except Exception as e:
+            logger.error(f"Error in _template_best_match ({template_name}): {e}")
+            return 0.0, None, None
+
+    @staticmethod
+    def find_active_over_disabled_template(
+        screen_img: np.ndarray,
+        active_template: str,
+        disabled_template: str,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        threshold: float = 0.8,
+    ) -> Tuple[Optional[int], Optional[int]]:
         """
-        Width × height of the cost-digit crop **just left** of the upgrade gold/elixir icons,
-        scaled from :data:`_UPGRADE_COST_LEFT_OF_ICON_ROI_AT_BASELINE` (150×40 @ 2560×1600 / 2560×1440).
+        Match active vs disabled (grayed/red) UI variants of the same control.
+
+        Each PNG is matched once via ``minMaxLoc`` (single best peak in ``region``). Among
+        active and disabled scores that meet ``threshold``, only the **highest** score is
+        considered; the active center is returned when that winner is the active template,
+        otherwise ``(None, None)`` (disabled/grayed control).
+
+        Falls back to ``find_template`` when the disabled PNG is missing (e.g. 16:10 pack).
+        """
+        disabled_path = get_template_path(disabled_template)
+        if not disabled_path.exists():
+            return VisionService.find_template(
+                screen_img, active_template, threshold=threshold, region=region
+            )
+
+        active_score, ax, ay = VisionService._template_best_match(
+            screen_img, active_template, region=region
+        )
+        disabled_score, dx, dy = VisionService._template_best_match(
+            screen_img, disabled_template, region=region
+        )
+
+        best_score = -1.0
+        best_is_active = False
+        best_x: Optional[int] = None
+        best_y: Optional[int] = None
+        for score, x, y, is_active in (
+            (active_score, ax, ay, True),
+            (disabled_score, dx, dy, False),
+        ):
+            if score >= threshold and x is not None and y is not None and score > best_score:
+                best_score = score
+                best_is_active = is_active
+                best_x, best_y = x, y
+
+        if not best_is_active or best_x is None or best_y is None:
+            return None, None
+        return best_x, best_y
+
+    @staticmethod
+    def scaled_multiupgrade_cost_redness_above(screen_w: int, screen_h: int) -> Tuple[int, int, int]:
+        """
+        Vertical center-to-center offset (template center → redness ROI center), ROI width,
+        ROI height — scaled from :data:`_MULTIUPGRADE_COST_REDNESS_ABOVE_AT_BASELINE`
+        (43 / 80 / 25 @ 2560×1440).
         """
         sw = max(1, int(screen_w))
         sh = max(1, int(screen_h))
@@ -300,12 +393,13 @@ class VisionService:
         if key is None or key not in ASPECT_BASELINE:
             key = ASPECT_16_10
         ref_w, ref_h = ASPECT_BASELINE[key]
-        base_rw, base_rh = _UPGRADE_COST_LEFT_OF_ICON_ROI_AT_BASELINE.get(
-            key, _UPGRADE_COST_LEFT_OF_ICON_ROI_AT_BASELINE[ASPECT_16_10]
+        base_offset, base_rw, base_rh = _MULTIUPGRADE_COST_REDNESS_ABOVE_AT_BASELINE.get(
+            key, _MULTIUPGRADE_COST_REDNESS_ABOVE_AT_BASELINE[ASPECT_16_10]
         )
+        center_offset = max(1, int(round(base_offset * sh / float(ref_h))))
         rw = max(1, int(round(base_rw * sw / float(ref_w))))
         rh = max(1, int(round(base_rh * sh / float(ref_h))))
-        return (rw, rh)
+        return (center_offset, rw, rh)
 
     @staticmethod
     def red_hue_fraction(bgr: np.ndarray, *, sat_floor: int = 40, val_floor: int = 40) -> float:
@@ -387,6 +481,97 @@ class VisionService:
             return None, None, None, None, 0.0
 
     @staticmethod
+    def _find_template_matches(
+        screen_img: np.ndarray,
+        template_name: str,
+        threshold: float,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        max_matches: int = 2,
+    ) -> List[Tuple[int, int, int, int, float]]:
+        """Up to ``max_matches`` non-overlapping ``matchTemplate`` hits: ``(left, top, t_w, t_h, score)``."""
+        try:
+            template_path = str(get_template_path(template_name))
+            template = cv2.imread(template_path)
+            if template is None:
+                logger.error(f"Template not found: {template_path}")
+                return []
+            template = VisionService._resize_template_for_screen(template, screen_img)
+
+            if region:
+                x, y, w, h = region
+                h_screen, w_screen = screen_img.shape[:2]
+                if x + w > w_screen or y + h > h_screen:
+                    return []
+                search_img = screen_img[y : y + h, x : x + w]
+                offset_x, offset_y = x, y
+            else:
+                search_img = screen_img
+                offset_x, offset_y = 0, 0
+
+            t_h, t_w = template.shape[:2]
+            s_h, s_w = search_img.shape[:2]
+            if t_w > s_w or t_h > s_h:
+                return []
+
+            result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
+            work = result.copy()
+            matches: List[Tuple[int, int, int, int, float]] = []
+            for _ in range(max(1, int(max_matches))):
+                _, max_val, _, max_loc = cv2.minMaxLoc(work)
+                score = float(max_val)
+                if score < threshold:
+                    break
+                left = offset_x + int(max_loc[0])
+                top = offset_y + int(max_loc[1])
+                matches.append((left, top, t_w, t_h, score))
+                y0 = max(0, max_loc[1] - t_h // 2)
+                y1 = min(work.shape[0], max_loc[1] + t_h + t_h // 2)
+                x0 = max(0, max_loc[0] - t_w // 2)
+                x1 = min(work.shape[1], max_loc[0] + t_w + t_w // 2)
+                work[y0:y1, x0:x1] = 0.0
+            return matches
+        except Exception as e:
+            logger.error(f"Error in _find_template_matches ({template_name}): {e}")
+            return []
+
+    @staticmethod
+    def _upgrade_cost_redness_for_template_rect(
+        screen_img: np.ndarray,
+        left: int,
+        top: int,
+        tw: int,
+        th: int,
+        conf: float,
+        *,
+        center_offset: int,
+        roi_w: int,
+        roi_h: int,
+        frame_w: int,
+        frame_h: int,
+    ) -> UpgradeCostIconRedness:
+        """Measure :meth:`red_hue_fraction` in an ``roi_w×roi_h`` box whose center sits ``center_offset`` px above the template center."""
+        tpl_cx = int(left) + int(tw) // 2
+        tpl_cy = int(top) + int(th) // 2
+        roi_cx = tpl_cx
+        roi_cy = tpl_cy - int(center_offset)
+        rx = roi_cx - int(roi_w) // 2
+        ry = roi_cy - int(roi_h) // 2
+        clipped = VisionService._clip_rect_xywh(rx, ry, roi_w, roi_h, frame_w, frame_h)
+        click_cx = tpl_cx
+        click_cy = tpl_cy
+        if clipped is None:
+            return UpgradeCostIconRedness(
+                "multiupgrade.png", True, conf, 0.0, None, (click_cx, click_cy)
+            )
+        x0, y0, cw, ch = clipped
+        crop = screen_img[y0 : y0 + ch, x0 : x0 + cw]
+        red = VisionService.red_hue_fraction(crop)
+        return UpgradeCostIconRedness(
+            "multiupgrade.png", True, conf, red, clipped, (click_cx, click_cy)
+        )
+
+    @staticmethod
     def upgrade_cost_redness_by_resource_icons(
         screen_img: np.ndarray,
         *,
@@ -394,43 +579,63 @@ class VisionService:
         region: Optional[Tuple[int, int, int, int]] = None,
     ) -> UpgradeCostRednessPair:
         """
-        Locate ``upgradegold.png`` and ``upgradeelixir.png`` (under the active aspect folder),
-        then measure :meth:`red_hue_fraction` in a **150×40-at-baseline** rectangle immediately to the
-        left of each icon (vertically centered on the template).
+        Locate ``multiupgrade.png`` (up to two matches), then measure :meth:`red_hue_fraction`
+        in an **80×25-at-baseline** box whose center is **43 px above** each template center
+        (scaled to capture size).
+
+        One match covers both gold and elixir slots (left / right halves). Two matches are
+        treated as separate gold (leftmost) and elixir (rightmost) buttons.
 
         Updates :class:`~app.config.Config` from ``screen_img`` so template paths match aspect.
         """
-        miss_gold = UpgradeCostIconRedness("upgradegold.png", False, 0.0, 0.0, None)
-        miss_elixir = UpgradeCostIconRedness("upgradeelixir.png", False, 0.0, 0.0, None)
+        miss = UpgradeCostIconRedness("multiupgrade.png", False, 0.0, 0.0, None, None)
 
         if screen_img is None or screen_img.size == 0:
-            return UpgradeCostRednessPair(miss_gold, miss_elixir)
+            return UpgradeCostRednessPair(miss, miss)
 
         cfg = Config()
         cfg.set_target_size_from_frame(screen_img)
         frame_h, frame_w = screen_img.shape[:2]
-        roi_w, roi_h = VisionService.scaled_upgrade_cost_left_roi_size(frame_w, frame_h)
-
-        def one(template: str) -> UpgradeCostIconRedness:
-            left, top, tw, th, conf = VisionService._match_template_top_left(
-                screen_img, template, match_threshold, region
-            )
-            if left is None or top is None or tw is None or th is None:
-                return UpgradeCostIconRedness(template, False, conf, 0.0, None)
-            rx = int(left) - roi_w
-            ry = int(top) + (int(th) - roi_h) // 2
-            clipped = VisionService._clip_rect_xywh(rx, ry, roi_w, roi_h, frame_w, frame_h)
-            if clipped is None:
-                return UpgradeCostIconRedness(template, True, conf, 0.0, None)
-            x0, y0, cw, ch = clipped
-            crop = screen_img[y0 : y0 + ch, x0 : x0 + cw]
-            red = VisionService.red_hue_fraction(crop)
-            return UpgradeCostIconRedness(template, True, conf, red, clipped)
-
-        return UpgradeCostRednessPair(
-            one("upgradegold.png"),
-            one("upgradeelixir.png"),
+        center_offset, roi_w, roi_h = VisionService.scaled_multiupgrade_cost_redness_above(
+            frame_w, frame_h
         )
+
+        matches = VisionService._find_template_matches(
+            screen_img,
+            "multiupgrade.png",
+            match_threshold,
+            region,
+            max_matches=2,
+        )
+        if not matches:
+            return UpgradeCostRednessPair(miss, miss)
+
+        def for_rect(left: int, top: int, tw: int, th: int, conf: float) -> UpgradeCostIconRedness:
+            return VisionService._upgrade_cost_redness_for_template_rect(
+                screen_img,
+                left,
+                top,
+                tw,
+                th,
+                conf,
+                center_offset=center_offset,
+                roi_w=roi_w,
+                roi_h=roi_h,
+                frame_w=frame_w,
+                frame_h=frame_h,
+            )
+
+        if len(matches) == 1:
+            left, top, tw, th, conf = matches[0]
+            half = max(1, tw // 2)
+            gold = for_rect(left, top, half, th, conf)
+            elixir = for_rect(left + half, top, tw - half, th, conf)
+        else:
+            matches = sorted(matches, key=lambda m: m[0])
+            gold = for_rect(*matches[0])
+            elixir = for_rect(*matches[1])
+
+        return UpgradeCostRednessPair(gold, elixir)
 
     @staticmethod
     def preprocess_bw_ui_text(

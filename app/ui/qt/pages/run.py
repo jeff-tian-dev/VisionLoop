@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -22,7 +19,11 @@ from PySide6.QtWidgets import (
 from app.config import check_game_window_aspect_for_start
 from app.services.license import LicenseState
 from app.services.trial import TRIAL_TOTAL_SECONDS, fetch_trial_status
-from app.ui.qt._constants import ATTACK_STRATEGIES
+from app.ui.qt._constants import (
+    ATTACK_STRATEGIES,
+    BUILDER_BASE_ATTACK_STRATEGIES,
+    BUILDER_BASE_PRIORITISE_LABELS,
+)
 from app.ui.qt.bot_controller import BotController
 from app.ui.qt.dialogs import RankedAttackConfirmDialog, show_error
 from app.ui.qt.theme import SPACING, TOKENS
@@ -37,12 +38,12 @@ from app.ui.qt.widgets import (
     primary_button,
     segment_button,
 )
-from app.utils.common import get_autoloot_log_path
 from app.utils.player_list_store import PlayerEntry, load_players
 
 
 class RunPage(QWidget):
     _STRATEGY_LABELS = ["Valkyries", "Sneaky Goblins", "Super Minions", "Edrags"]
+    _VILLAGE_LABELS = ["Home Village", "Builder Base"]
 
     def __init__(
         self,
@@ -56,7 +57,9 @@ class RunPage(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["lg"])
-        outer.setSpacing(0)
+        outer.setSpacing(SPACING["md"])
+
+        outer.addWidget(self._build_village_selector())
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -65,18 +68,66 @@ class RunPage(QWidget):
         layout = QVBoxLayout(content)
         layout.setSpacing(SPACING["md"])
 
-        layout.addWidget(self._build_attack_card())
+        self._attack_card = self._build_attack_card()
+        layout.addWidget(self._attack_card)
+        self._bb_attack_card = self._build_bb_attack_card()
+        layout.addWidget(self._bb_attack_card)
         layout.addWidget(self._build_schedule_card())
-        layout.addWidget(self._build_modes_card())
+        self._modes_card = self._build_modes_card()
+        layout.addWidget(self._modes_card)
+        self._bb_modes_card = self._build_bb_modes_card()
+        layout.addWidget(self._bb_modes_card)
         layout.addWidget(self._build_controls_card())
         layout.addStretch()
 
         scroll.setWidget(content)
         outer.addWidget(scroll)
 
+        self._apply_village_ui()
+
         self._controller.botStarted.connect(self._on_bot_started)
         self._controller.botFinished.connect(self._on_bot_finished_ui)
         self._controller.runningChanged.connect(self._on_running_changed)
+
+    def _build_village_selector(self) -> QWidget:
+        wrapper = QWidget()
+        row = QHBoxLayout(wrapper)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._village_group = QButtonGroup(self)
+        self._village_group.setExclusive(True)
+        for i, label in enumerate(self._VILLAGE_LABELS):
+            btn = segment_button(label, parent=wrapper)
+            if label == "Home Village":
+                btn.setChecked(True)
+                self._village_group.addButton(btn, i)
+            elif label == "Builder Base":
+                btn.setCheckable(False)
+                btn.setProperty("underDevelopment", True)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(self._on_builder_base_clicked)
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+            row.addWidget(btn)
+        row.addStretch()
+        self._village_group.idClicked.connect(self._on_village_changed)
+        return wrapper
+
+    def _on_builder_base_clicked(self) -> None:
+        QMessageBox.information(self, "Builder Base", "Under development")
+
+    def _is_builder_base(self) -> bool:
+        btn = self._village_group.checkedButton()
+        return btn is not None and btn.text() == "Builder Base"
+
+    def _on_village_changed(self, _button_id: int) -> None:
+        self._apply_village_ui()
+
+    def _apply_village_ui(self) -> None:
+        builder_base = self._is_builder_base()
+        self._attack_card.setVisible(not builder_base)
+        self._modes_card.setVisible(not builder_base)
+        self._bb_attack_card.setVisible(builder_base)
+        self._bb_modes_card.setVisible(builder_base)
 
     def _build_attack_card(self) -> Card:
         card = Card()
@@ -90,6 +141,22 @@ class RunPage(QWidget):
                 btn.setChecked(True)
             self._strategy_group.addButton(btn, i)
             row.addWidget(btn)
+        card.card_layout.addLayout(row)
+        return card
+
+    def _build_bb_attack_card(self) -> Card:
+        card = Card()
+        card.card_layout.addWidget(SectionTitle("Attack Strategy"))
+        row = QHBoxLayout()
+        self._bb_strategy_group = QButtonGroup(self)
+        self._bb_strategy_group.setExclusive(True)
+        for i, label in enumerate(BUILDER_BASE_ATTACK_STRATEGIES):
+            btn = segment_button(label, parent=card)
+            if label == "Baby Dragon":
+                btn.setChecked(True)
+            self._bb_strategy_group.addButton(btn, i)
+            row.addWidget(btn)
+        row.addStretch()
         card.card_layout.addLayout(row)
         return card
 
@@ -123,6 +190,7 @@ class RunPage(QWidget):
         step_col.addWidget(self._btn_spin_down)
 
         self._minutes_unit = QLabel("minutes")
+        self._minutes_unit.setObjectName("DurationUnit")
         self._minutes_unit.setStyleSheet(f"color: {TOKENS['text_muted']};")
 
         spin_group = QHBoxLayout()
@@ -147,6 +215,7 @@ class RunPage(QWidget):
         preset_row.addWidget(self._btn_20m)
         preset_row.addStretch()
         card.card_layout.addLayout(preset_row)
+        self._on_star_bonus_toggle(self._star_bonus.isChecked())
         return card
 
     def _build_modes_card(self) -> Card:
@@ -167,6 +236,33 @@ class RunPage(QWidget):
         card.card_layout.addLayout(mr_row)
         return card
 
+    def _build_bb_modes_card(self) -> Card:
+        card = Card()
+        card.card_layout.addWidget(SectionTitle("Modes"))
+        prior_row = QHBoxLayout()
+        prior_row.addWidget(SectionTitle("Prioritise"))
+        self._bb_prioritise_group = QButtonGroup(self)
+        self._bb_prioritise_group.setExclusive(True)
+        for i, label in enumerate(BUILDER_BASE_PRIORITISE_LABELS):
+            btn = segment_button(label, parent=card)
+            if label == "Both":
+                btn.setChecked(True)
+            self._bb_prioritise_group.addButton(btn, i)
+            prior_row.addWidget(btn)
+        prior_row.addStretch()
+        card.card_layout.addLayout(prior_row)
+        return card
+
+    def _confirm_bb_elixir_prioritise(self) -> bool:
+        reply = QMessageBox.warning(
+            self.window(),
+            "Elixir priority",
+            "Prioritising Elixir will deplete your trophies.\n\nDo you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
     def _build_controls_card(self) -> Card:
         card = Card()
         btn_row = QHBoxLayout()
@@ -180,10 +276,6 @@ class RunPage(QWidget):
         self._btn_stop.clicked.connect(self._controller.stop)
         btn_row.addWidget(self._btn_stop)
         card.card_layout.addLayout(btn_row)
-
-        self._btn_log = neutral_button("Error Log", parent=card)
-        self._btn_log.clicked.connect(self._open_autoloot_log)
-        card.card_layout.addWidget(self._btn_log)
         return card
 
     def _clear_minutes_selection(self) -> None:
@@ -193,6 +285,8 @@ class RunPage(QWidget):
             editor.setCursorPosition(len(editor.text()))
 
     def _step_minutes(self, delta: int) -> None:
+        if self._star_bonus.isChecked():
+            return
         if delta > 0:
             self._minutes_spin.stepUp()
         else:
@@ -201,31 +295,52 @@ class RunPage(QWidget):
         QTimer.singleShot(0, self._clear_minutes_selection)
 
     def _set_minutes(self, value: int) -> None:
+        if self._star_bonus.isChecked():
+            return
         self._minutes_spin.setValue(value)
         self._clear_minutes_selection()
 
     def _on_star_bonus_toggle(self, checked: bool) -> None:
         enabled = not checked
-        self._minutes_spin.setEnabled(enabled)
-        self._duration_label.setEnabled(enabled)
-        self._btn_spin_up.setEnabled(enabled)
-        self._btn_spin_down.setEnabled(enabled)
-        self._minutes_unit.setEnabled(enabled)
-        self._btn_5m.setEnabled(enabled)
-        self._btn_10m.setEnabled(enabled)
-        self._btn_20m.setEnabled(enabled)
+        duration_widgets = (
+            self._duration_label,
+            self._minutes_spin,
+            self._btn_spin_up,
+            self._btn_spin_down,
+            self._minutes_unit,
+            self._btn_5m,
+            self._btn_10m,
+            self._btn_20m,
+        )
+        for widget in duration_widgets:
+            widget.setEnabled(enabled)
+        if enabled:
+            self._minutes_unit.setStyleSheet(f"color: {TOKENS['text_muted']};")
+        else:
+            self._minutes_unit.setStyleSheet("color: #4a5568;")
 
     def _get_method(self) -> int:
+        if self._is_builder_base():
+            btn = self._bb_strategy_group.checkedButton()
+            if btn is None:
+                return BUILDER_BASE_ATTACK_STRATEGIES["Baby Dragon"]
+            return BUILDER_BASE_ATTACK_STRATEGIES.get(btn.text(), 5)
         btn = self._strategy_group.checkedButton()
         if btn is None:
             return ATTACK_STRATEGIES["Valkyries"]
         return ATTACK_STRATEGIES.get(btn.text(), 1)
 
+    def _get_bb_prioritise(self) -> str:
+        btn = self._bb_prioritise_group.checkedButton()
+        if btn is None:
+            return "both"
+        return btn.text().lower()
+
     def _get_minutes(self) -> int:
         return self._minutes_spin.value()
 
     def _multi_run_players_for_start(self) -> Optional[List[PlayerEntry]]:
-        if not self._multi_run.isChecked():
+        if self._is_builder_base() or not self._multi_run.isChecked():
             return None
         players = load_players()
         if not any(p.enabled and p.name.strip() for p in players):
@@ -255,12 +370,16 @@ class RunPage(QWidget):
                 return
             self._controller.apply_trial_balance_for_start(result)
 
-        if not check_game_window_aspect_for_start(parent=self.window()):
+        if not check_game_window_aspect_for_start(
+            parent=self.window(),
+            on_configure=lambda: self._navigate_to("settings"),
+        ):
             return
 
+        builder_base = self._is_builder_base()
         method = self._get_method()
         multi_arg = self._multi_run_players_for_start()
-        if self._multi_run.isChecked() and not multi_arg:
+        if not builder_base and self._multi_run.isChecked() and not multi_arg:
             show_error(
                 self.window(),
                 "Multi-run",
@@ -277,18 +396,25 @@ class RunPage(QWidget):
         else:
             mins = 5
 
-        if self._ranked.isChecked():
+        ranked_fill = False if builder_base else self._ranked.isChecked()
+        if ranked_fill:
             confirm_mins = self._get_minutes()
             if not RankedAttackConfirmDialog.ask(self.window(), confirm_mins):
+                return
+
+        if builder_base and self._get_bb_prioritise() == "elixir":
+            if not self._confirm_bb_elixir_prioritise():
                 return
 
         self._controller.start(
             method=method,
             minutes=mins,
             star_bonus=star_bonus,
-            ranked_fill=self._ranked.isChecked(),
-            upgrade_walls=self._upgrade_walls.isChecked(),
+            ranked_fill=ranked_fill,
+            upgrade_walls=False if builder_base else self._upgrade_walls.isChecked(),
             multi_run_players=multi_arg,
+            builder_base=builder_base,
+            loot_prioritise=self._get_bb_prioritise() if builder_base else "both",
         )
 
     def is_star_bonus_enabled(self) -> bool:
@@ -313,22 +439,3 @@ class RunPage(QWidget):
     def _on_running_changed(self, running: bool) -> None:
         self._btn_start.setEnabled(not running)
         self._btn_stop.setEnabled(running)
-
-    def _open_autoloot_log(self) -> None:
-        path = get_autoloot_log_path()
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if not path.is_file():
-                path.touch()
-        except OSError as exc:
-            show_error(self.window(), "Log file", f"Could not create log file:\n{path}\n\n{exc}")
-            return
-        try:
-            if sys.platform == "win32":
-                os.startfile(path)  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.run(["open", str(path)], check=False)
-            else:
-                subprocess.run(["xdg-open", str(path)], check=False)
-        except OSError as exc:
-            show_error(self.window(), "Log file", f"Could not open log:\n{path}\n\n{exc}")

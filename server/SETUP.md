@@ -129,6 +129,14 @@ sudo -u licapi .venv/bin/python -m server.admin_cli lookup --email customer@exam
 sudo -u licapi .venv/bin/python -m server.admin_cli lookup --key CLASH-XXXX-XXXX-XXXX-XXXX
 ```
 
+### Extend a key's access by N days
+
+```bash
+sudo -u licapi .venv/bin/python -m server.admin_cli extend CLASH-XXXX-XXXX-XXXX-XXXX --days 2 --notes "goodwill"
+```
+
+For timed/month-bundle keys this bumps `licenses.expires_at` to `max(now, expires_at) + N days`. For Stripe **subscription**-backed keys it also pushes the subscription's next billing date (`trial_end`, no proration) so the `customer.subscription.updated` webhook won't revert the change. Lifetime keys (no expiry) and revoked keys are refused.
+
 ### Transfer a key to a new machine (reset hardware binding)
 
 ```bash

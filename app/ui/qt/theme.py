@@ -54,6 +54,12 @@ QLabel#SectionTitle {{
     font-size: 13px;
     background-color: transparent;
 }}
+QLabel#SectionTitle:disabled {{
+    color: #4a5568;
+}}
+QLabel#DurationUnit:disabled {{
+    color: #4a5568;
+}}
 QLabel#PageTitle {{
     font-size: 20px;
     font-weight: bold;
@@ -106,6 +112,10 @@ QPushButton[role="chip"] {{
 QPushButton[role="chip"]:hover {{
     background-color: {TOKENS['neutral_dark_hov']};
 }}
+QPushButton[role="chip"]:disabled {{
+    background-color: {TOKENS['surface_hi']};
+    color: #4a5568;
+}}
 QPushButton[role="segment"] {{
     background-color: transparent;
     border: 1px solid {TOKENS['border_hi']};
@@ -116,6 +126,16 @@ QPushButton[role="segment"]:checked {{
     color: #fff;
     border-color: {TOKENS['primary']};
     font-weight: bold;
+}}
+QPushButton[role="segment"][underDevelopment="true"] {{
+    color: #4a5568;
+    border-color: {TOKENS['border']};
+    background-color: {TOKENS['surface']};
+}}
+QPushButton[role="segment"][underDevelopment="true"]:hover {{
+    color: #6b7280;
+    border-color: {TOKENS['border_hi']};
+    background-color: {TOKENS['surface_hi']};
 }}
 QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
     background-color: {TOKENS['surface_hi']};
@@ -131,6 +151,11 @@ QSpinBox#DurationSpin {{
     min-height: 28px;
     max-height: 28px;
     padding: 2px 6px;
+}}
+QSpinBox:disabled, QSpinBox#DurationSpin:disabled {{
+    color: #4a5568;
+    background-color: {TOKENS['surface']};
+    border-color: {TOKENS['border']};
 }}
 QPushButton[role="stepper"] {{
     background-color: {TOKENS['neutral_dark']};

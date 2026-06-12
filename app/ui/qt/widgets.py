@@ -157,6 +157,7 @@ def chip_button(text: str, *, parent: Optional[QWidget] = None) -> QPushButton:
 def segment_button(text: str, *, parent: Optional[QWidget] = None) -> QPushButton:
     btn = _styled_button(text, "segment", parent)
     btn.setCheckable(True)
+    btn.setMinimumWidth(int(btn.sizeHint().width() * 1.10))
     return btn
 
 

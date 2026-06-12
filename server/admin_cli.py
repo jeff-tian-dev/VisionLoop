@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import click
 import requests
+from dateutil.parser import parse as parse_dt
 
 from .keys import generate_license_key
 
@@ -170,6 +171,129 @@ def reset_machine(key: str) -> None:
         sys.exit(1)
 
     _out({"reset": True, "key": key, "message": "Machine binding removed (if any)."})
+
+
+def _parse_expires(raw: object) -> datetime | None:
+    if not raw:
+        return None
+    dt = parse_dt(str(raw))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _stripe_period_end_ts(sub: object) -> int | None:
+    """current_period_end as a Unix ts, checking both old top-level and new item locations."""
+    ts = getattr(sub, "current_period_end", None)
+    if ts is not None:
+        return int(ts)
+    items = getattr(sub, "items", None)
+    data = getattr(items, "data", None) if items is not None else None
+    if isinstance(data, list) and data:
+        item_ts = getattr(data[0], "current_period_end", None)
+        if item_ts is not None:
+            return int(item_ts)
+    return None
+
+
+def _extend_stripe_subscription(subscription_id: str, days: int) -> str:
+    """Push the subscription's next billing date out by N days (no proration).
+
+    Returns the new period end as an ISO timestamp. Raises on misconfiguration so
+    the caller can avoid a half-applied extension.
+    """
+    secret = os.environ.get("STRIPE_SECRET_KEY", "")
+    if not secret:
+        raise RuntimeError(
+            "STRIPE_SECRET_KEY not set — cannot extend a subscription-backed key "
+            "(source /etc/license-api.env)"
+        )
+    import stripe
+
+    stripe.api_key = secret
+    sub = stripe.Subscription.retrieve(subscription_id, expand=["items"])
+    period_end = _stripe_period_end_ts(sub)
+    if period_end is None:
+        raise RuntimeError(f"Subscription {subscription_id} has no current_period_end")
+    new_end = period_end + days * 86400
+    stripe.Subscription.modify(
+        subscription_id,
+        trial_end=new_end,
+        proration_behavior="none",
+    )
+    return datetime.fromtimestamp(new_end, tz=timezone.utc).isoformat()
+
+
+@cli.command()
+@click.argument("key")
+@click.option("--days", type=int, required=True, help="Whole days to add (must be positive).")
+@click.option("--notes", default="")
+def extend(key: str, days: int, notes: str) -> None:
+    """Extend a license's access window by N days.
+
+    Timed/month-bundle keys: bumps licenses.expires_at to max(now, expires_at) + N days.
+    Subscription-backed keys: also pushes Stripe's next billing date (trial_end) so the
+    customer.subscription.updated webhook won't revert the change.
+    Lifetime keys (no expiry) are refused — they already have unlimited access.
+    """
+    if days <= 0:
+        click.echo("--days must be a positive integer", err=True)
+        sys.exit(1)
+
+    r = _get("/licenses", params={"select": "*", "license_key": f"eq.{key}", "limit": "1"})
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        _out({"error": "Key not found", "key": key})
+        sys.exit(1)
+    lic = rows[0]
+
+    if lic.get("status") == "revoked":
+        _out({"error": "Key is revoked — extending will not restore access", "key": key})
+        sys.exit(1)
+
+    sub_id = lic.get("stripe_subscription_id")
+    cur_dt = _parse_expires(lic.get("expires_at"))
+
+    if cur_dt is None and not sub_id:
+        _out({
+            "error": "Key has no expiry (lifetime) — nothing to extend",
+            "key": key,
+        })
+        sys.exit(1)
+
+    now = datetime.now(timezone.utc)
+
+    if sub_id:
+        try:
+            new_exp_iso = _extend_stripe_subscription(str(sub_id), days)
+        except Exception as exc:
+            _out({"error": f"Stripe extend failed: {exc}", "key": key, "subscription": sub_id})
+            sys.exit(1)
+    else:
+        base = max(now, cur_dt) if cur_dt else now
+        new_exp_iso = (base + timedelta(days=days)).isoformat()
+
+    patch_body: dict[str, Any] = {"expires_at": new_exp_iso}
+    if notes:
+        patch_body["notes"] = notes
+
+    pr = _patch("/licenses", params={"license_key": f"eq.{key}"}, json_body=patch_body)
+    if pr.status_code in (404, 406):
+        _out({"error": "Key not found", "key": key})
+        sys.exit(1)
+    if pr.status_code not in (200, 204):
+        _out({"error": pr.text, "status": pr.status_code})
+        sys.exit(1)
+
+    _out({
+        "extended": True,
+        "key": key,
+        "days": days,
+        "expires_at": new_exp_iso,
+        "subscription": sub_id,
+        "previous_expires_at": lic.get("expires_at"),
+    })
 
 
 if __name__ == "__main__":

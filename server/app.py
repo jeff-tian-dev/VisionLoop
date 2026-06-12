@@ -255,6 +255,9 @@ async def validate(request: Request, body: ValidateRequest) -> dict:
     reason = result.get("reason")
     if reason:
         out["reason"] = reason
+    if valid:
+        # null = lifetime; ISO timestamp = subscription / timed key (migration 0006+)
+        out["expires_at"] = result.get("expires_at")
     return out
 
 
