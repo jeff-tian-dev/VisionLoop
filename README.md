@@ -1,4 +1,4 @@
-# Clash AutoLoot
+# VisionLoop
 
 A production Windows desktop application that automates Clash of Clans resource farming using a custom computer vision and Win32 input injection pipeline — deployed with a commercial licensing backend, SaaS billing, and a bundled PyInstaller distribution.
 
