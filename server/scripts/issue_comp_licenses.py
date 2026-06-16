@@ -4,8 +4,9 @@ Double-click or run::
 
     python -m server.scripts.issue_comp_licenses
 
-You will be prompted for email, how many keys, optional notes, and (if needed) an
-``.env`` file path so ``SUPABASE_URL`` and ``SUPABASE_ANON_KEY`` are loaded.
+You will be prompted for email, how many keys, access duration (lifetime, days, or months),
+optional notes, and (if needed) an ``.env`` file path so ``SUPABASE_URL`` and
+``SUPABASE_ANON_KEY`` are loaded.
 
 Uses the same PostgREST ``POST /licenses`` flow as :mod:`server.admin_cli`.
 
@@ -16,11 +17,13 @@ Headless servers should keep using::
 from __future__ import annotations
 
 import os
-import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext
 from tkinter import ttk
 import tkinter as tk
+
+from dateutil.relativedelta import relativedelta
 
 from server.admin_cli import _post
 from server.keys import generate_license_key
@@ -31,7 +34,27 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 _MAX_KEYS = 99
+_MAX_DAYS = 999
+_MAX_MONTHS = 36
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def compute_issue_expires_at(*, unit: str, amount: int) -> str | None:
+    """Return ISO ``expires_at`` for a new key, or ``None`` for lifetime."""
+    if unit == "lifetime":
+        return None
+    now = datetime.now(timezone.utc)
+    if unit == "days":
+        if amount < 1 or amount > _MAX_DAYS:
+            raise ValueError(f"days must be between 1 and {_MAX_DAYS}")
+        expires = now + timedelta(days=amount)
+    elif unit == "months":
+        if amount < 1 or amount > _MAX_MONTHS:
+            raise ValueError(f"months must be between 1 and {_MAX_MONTHS}")
+        expires = now + relativedelta(months=amount)
+    else:
+        raise ValueError(f"unknown duration unit: {unit!r}")
+    return expires.isoformat()
 
 
 def _try_load_dotenv_files() -> None:
@@ -62,7 +85,13 @@ def _load_env_path(path: str) -> tuple[bool, str]:
     return False, f"Loaded {p} but SUPABASE_URL / SUPABASE_ANON_KEY still missing."
 
 
-def issue_batch(email: str, count: int, notes: str) -> tuple[list[dict[str, object]], list[str]]:
+def issue_batch(
+    email: str,
+    count: int,
+    notes: str,
+    *,
+    expires_at: str | None = None,
+) -> tuple[list[dict[str, object]], list[str]]:
     """Mint keys via REST; returns ``(issued_rows, error_messages)``."""
     issued: list[dict[str, object]] = []
     errors: list[str] = []
@@ -75,6 +104,8 @@ def issue_batch(email: str, count: int, notes: str) -> tuple[list[dict[str, obje
             "email": email.strip(),
             "notes": notes.strip() if notes.strip() else None,
         }
+        if expires_at is not None:
+            body["expires_at"] = expires_at
         if body["notes"] is None:
             del body["notes"]
 
@@ -97,8 +128,8 @@ class IssueLicensesApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Issue complimentary license keys")
-        self.minsize(520, 460)
-        self.geometry("620x520")
+        self.minsize(520, 500)
+        self.geometry("620x560")
 
         _try_load_dotenv_files()
 
@@ -143,6 +174,44 @@ class IssueLicensesApp(tk.Tk):
         )
         sp.pack(side=tk.LEFT)
 
+        dur_row = ttk.Frame(frm)
+        dur_row.pack(fill=tk.X, **pad)
+        ttk.Label(dur_row, text="Access duration:", width=18).pack(side=tk.LEFT)
+
+        self._duration_unit = tk.StringVar(value="lifetime")
+        ttk.Radiobutton(
+            dur_row,
+            text="Lifetime",
+            variable=self._duration_unit,
+            value="lifetime",
+            command=self._on_duration_unit_changed,
+        ).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            dur_row,
+            text="Days",
+            variable=self._duration_unit,
+            value="days",
+            command=self._on_duration_unit_changed,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Radiobutton(
+            dur_row,
+            text="Months",
+            variable=self._duration_unit,
+            value="months",
+            command=self._on_duration_unit_changed,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        self._duration_amount = tk.IntVar(value=30)
+        self._duration_spin = ttk.Spinbox(
+            dur_row,
+            from_=1,
+            to=_MAX_DAYS,
+            width=8,
+            textvariable=self._duration_amount,
+            state=tk.DISABLED,
+        )
+        self._duration_spin.pack(side=tk.LEFT, padx=(16, 0))
+
         ttk.Label(frm, text="Notes (optional, e.g. friend name):").pack(anchor=tk.W, **pad)
         self._notes = tk.StringVar(value="complimentary")
         ttk.Entry(frm, textvariable=self._notes, width=60).pack(fill=tk.X, **pad)
@@ -167,6 +236,24 @@ class IssueLicensesApp(tk.Tk):
 
         self._refresh_cred_status()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _on_duration_unit_changed(self) -> None:
+        unit = self._duration_unit.get()
+        if unit == "lifetime":
+            self._duration_spin.configure(state=tk.DISABLED)
+            return
+        self._duration_spin.configure(state=tk.NORMAL)
+        max_val = _MAX_DAYS if unit == "days" else _MAX_MONTHS
+        self._duration_spin.configure(to=max_val)
+        try:
+            amount = int(self._duration_amount.get())
+        except (tk.TclError, ValueError):
+            amount = 30
+        if amount < 1:
+            amount = 1
+        elif amount > max_val:
+            amount = max_val
+        self._duration_amount.set(amount)
 
     def _refresh_cred_status(self) -> None:
         if _credentials_configured():
@@ -235,19 +322,33 @@ class IssueLicensesApp(tk.Tk):
             messagebox.showerror("Count", f"Choose between 1 and {_MAX_KEYS} keys.")
             return
 
+        unit = self._duration_unit.get()
+        try:
+            amount = int(self._duration_amount.get()) if unit != "lifetime" else 0
+        except (tk.TclError, ValueError):
+            messagebox.showerror("Duration", "Enter a valid duration amount.")
+            return
+
+        try:
+            expires_at = compute_issue_expires_at(unit=unit, amount=amount)
+        except ValueError as exc:
+            messagebox.showerror("Duration", str(exc))
+            return
+
         notes = self._notes.get()
         self._issue_btn.configure(state=tk.DISABLED)
         self.update_idletasks()
 
         try:
-            issued, errors = issue_batch(email, count, notes)
+            issued, errors = issue_batch(email, count, notes, expires_at=expires_at)
         finally:
             self._issue_btn.configure(state=tk.NORMAL)
 
         self._clear_keys()
         lines = []
         if issued:
-            lines.append(f"Issued {len(issued)} key(s) for {email!r}:")
+            duration_label = "lifetime" if expires_at is None else expires_at
+            lines.append(f"Issued {len(issued)} key(s) for {email!r} ({duration_label}):")
             lines.append("")
             for row in issued:
                 lk = row.get("license_key", "?")

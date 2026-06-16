@@ -381,6 +381,134 @@ class VisionService:
         return best_x, best_y
 
     @staticmethod
+    def lime_fraction(
+        bgr: np.ndarray,
+        *,
+        hue_lo: int = 35,
+        hue_hi: int = 90,
+        sat_floor: int = 80,
+        val_floor: int = 80,
+    ) -> float:
+        """
+        Fraction of pixels in lime/chartreuse hue (OpenCV H 0–179) with saturation
+        and value at least ``sat_floor`` / ``val_floor``.
+        """
+        if bgr is None or bgr.size == 0 or bgr.ndim != 3:
+            return 0.0
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        sf = max(0, min(255, int(sat_floor)))
+        vf = max(0, min(255, int(val_floor)))
+        mask = cv2.inRange(hsv, (int(hue_lo), sf, vf), (int(hue_hi), 255, 255))
+        total = int(bgr.shape[0]) * int(bgr.shape[1])
+        return float(cv2.countNonZero(mask)) / float(total) if total > 0 else 0.0
+
+    @staticmethod
+    def find_active_addwall(
+        screen_img: np.ndarray,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        template_threshold: float = 0.8,
+        lime_threshold: float = 0.30,
+        max_matches: int = 32,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Locate an active (lime green) add-wall control via ``addwall.png`` template
+        matching plus per-hit lime color verification.
+
+        Returns the **rightmost** center among hits that pass both ``template_threshold``
+        and ``lime_threshold``, or ``(None, None)`` when none qualify.
+        """
+        matches = VisionService._find_template_matches(
+            screen_img,
+            "addwall.png",
+            template_threshold,
+            region,
+            max_matches=max_matches,
+        )
+        if not matches:
+            return None, None
+
+        frame_h, frame_w = screen_img.shape[:2]
+        passing: List[Tuple[int, int]] = []
+        for left, top, tw, th, _score in matches:
+            x0 = max(0, min(int(left), frame_w))
+            y0 = max(0, min(int(top), frame_h))
+            x1 = max(0, min(int(left) + int(tw), frame_w))
+            y1 = max(0, min(int(top) + int(th), frame_h))
+            crop = screen_img[y0:y1, x0:x1]
+            if VisionService.lime_fraction(crop) < lime_threshold:
+                continue
+            passing.append((int(left) + int(tw) // 2, int(top) + int(th) // 2))
+
+        if not passing:
+            return None, None
+        return max(passing, key=lambda pt: pt[0])
+
+    @staticmethod
+    def yellow_fraction(
+        bgr: np.ndarray,
+        *,
+        hue_lo: int = 18,
+        hue_hi: int = 40,
+        sat_floor: int = 80,
+        val_floor: int = 80,
+    ) -> float:
+        """
+        Fraction of pixels in yellow hue (OpenCV H 0–179) with saturation and value
+        at least ``sat_floor`` / ``val_floor``.
+        """
+        if bgr is None or bgr.size == 0 or bgr.ndim != 3:
+            return 0.0
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        sf = max(0, min(255, int(sat_floor)))
+        vf = max(0, min(255, int(val_floor)))
+        mask = cv2.inRange(hsv, (int(hue_lo), sf, vf), (int(hue_hi), 255, 255))
+        total = int(bgr.shape[0]) * int(bgr.shape[1])
+        return float(cv2.countNonZero(mask)) / float(total) if total > 0 else 0.0
+
+    @staticmethod
+    def find_active_removewall(
+        screen_img: np.ndarray,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        template_threshold: float = 0.8,
+        yellow_threshold: float = 0.30,
+        max_matches: int = 32,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Locate an active (yellow) remove-wall control via ``removewall.png`` template
+        matching plus per-hit yellow color verification.
+
+        Returns the **leftmost** center among hits that pass both ``template_threshold``
+        and ``yellow_threshold``, or ``(None, None)`` when none qualify.
+        """
+        matches = VisionService._find_template_matches(
+            screen_img,
+            "removewall.png",
+            template_threshold,
+            region,
+            max_matches=max_matches,
+        )
+        if not matches:
+            return None, None
+
+        frame_h, frame_w = screen_img.shape[:2]
+        passing: List[Tuple[int, int]] = []
+        for left, top, tw, th, _score in matches:
+            x0 = max(0, min(int(left), frame_w))
+            y0 = max(0, min(int(top), frame_h))
+            x1 = max(0, min(int(left) + int(tw), frame_w))
+            y1 = max(0, min(int(top) + int(th), frame_h))
+            crop = screen_img[y0:y1, x0:x1]
+            if VisionService.yellow_fraction(crop) < yellow_threshold:
+                continue
+            passing.append((int(left) + int(tw) // 2, int(top) + int(th) // 2))
+
+        if not passing:
+            return None, None
+        return min(passing, key=lambda pt: pt[0])
+
+    @staticmethod
     def scaled_multiupgrade_cost_redness_above(screen_w: int, screen_h: int) -> Tuple[int, int, int]:
         """
         Vertical center-to-center offset (template center → redness ROI center), ROI width,

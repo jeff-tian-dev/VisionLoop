@@ -2,7 +2,7 @@
 
 Components
 ----------
-HardwareFingerprint  - Stable 32-hex machine ID (MachineGuid + board serial).
+HardwareFingerprint  - Stable 32-hex machine ID (Windows MachineGuid only).
 LicenseClient        - HTTP calls to the validation API.
 LicenseState         - Enum of all possible client states.
 LicenseManager       - State machine + background scheduler. Singleton.
@@ -12,8 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import subprocess
-import sys
 import threading
 import time
 import winreg
@@ -72,12 +70,7 @@ class HardwareFingerprint:
 
     @classmethod
     def _build(cls) -> str:
-        parts = [
-            cls._machine_guid(),
-            cls._motherboard_serial(),
-        ]
-        combined = "|".join(parts)
-        digest = hashlib.sha256(combined.encode()).hexdigest()[:32]
+        digest = hashlib.sha256(cls._machine_guid().encode()).hexdigest()[:32]
         logger.debug("Hardware fingerprint computed (first 8: %s...)", digest[:8])
         return digest
 
@@ -91,24 +84,6 @@ class HardwareFingerprint:
             value, _ = winreg.QueryValueEx(key, "MachineGuid")
             winreg.CloseKey(key)
             return str(value).strip()
-        except Exception:
-            return "<unavailable>"
-
-    @staticmethod
-    def _motherboard_serial() -> str:
-        try:
-            sub_kw: dict = {
-                "timeout": 5,
-                "stderr": subprocess.DEVNULL,
-            }
-            if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-                sub_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-            result = subprocess.check_output(
-                ["powershell", "-NoProfile", "-Command",
-                 "(Get-CimInstance Win32_BaseBoard).SerialNumber"],
-                **sub_kw,
-            )
-            return result.decode(errors="ignore").strip()
         except Exception:
             return "<unavailable>"
 

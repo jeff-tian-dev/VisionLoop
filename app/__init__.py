@@ -1,2 +1,2 @@
 """Clash Auto Loot bot application."""
-__version__ = "1.0.3"
+__version__ = "1.0.4"

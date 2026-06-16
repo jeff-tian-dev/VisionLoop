@@ -273,6 +273,17 @@ class Bot:
         ex, ey = self.vision.find_template(frame, "helixirfull.png", threshold=0.85)
         return gx is not None or ex is not None
 
+    def _maybe_upgrade_walls(self, upgrade_walls: bool) -> None:
+        """Upgrade walls on home when enabled and storages look full."""
+        if not upgrade_walls or not self._should_upgrade_walls():
+            return
+        # Record loot before wall spend so post-raid deltas stay non-negative.
+        self._loot_snapshot_before_attack()
+        for _ in range(2):
+            self._check_stop()
+            self._upgrade_walls()
+        self._suppress_loot_negative_error_once = True
+
     def _upgrade_walls_pick_resource_and_okay(self) -> None:
         """Fresh frame → redness above multiupgrade → click affordable slot → Okay."""
         frame = self.window.screenshot()
@@ -359,9 +370,7 @@ class Bot:
             elixir_red = pair.elixir.redness
             if gold_red < 0.2 or elixir_red < 0.2:
                 bot_roi = VisionService.bottom_half_region(frame)
-                awx, awy = VisionService.find_active_over_disabled_template(
-                    frame, "addwall.png", "addwallfake.png", region=bot_roi, threshold=0.6
-                )
+                awx, awy = VisionService.find_active_addwall(frame, region=bot_roi)
                 if awx:
                     self.input.click(awx, awy, pause=0.3)
                 else:
@@ -383,9 +392,7 @@ class Bot:
                 return
 
             bot_roi = VisionService.bottom_half_region(frame)
-            rwx, rwy = VisionService.find_active_over_disabled_template(
-                frame, "removewall.png", "removewallfake.png", region=bot_roi, threshold=0.7
-            )
+            rwx, rwy = VisionService.find_active_removewall(frame, region=bot_roi)
             if not rwx:
                 self._upgrade_walls_pick_resource_and_okay()
                 return
@@ -461,18 +468,11 @@ class Bot:
             )
             return
 
+        # On home after initial scroll — before first attack (same slot as post-raid wall check).
+        self._maybe_upgrade_walls(upgrade_walls)
+
         while time.time() - start_time < duration_seconds:
             self._check_stop()
-
-            # Upgrade walls while still on home (before leaving for an attack).
-            if upgrade_walls and self._should_upgrade_walls():
-                # Same HUD/delta logic as pre-attack: record loot **before** wall spend so deltas
-                # are non-negative on raid gains; spend on walls is absorbed by the snapshot before Attack.
-                self._loot_snapshot_before_attack()
-                for _ in range(2):
-                    self._check_stop()
-                    self._upgrade_walls()
-                self._suppress_loot_negative_error_once = True
 
             # Start Attack
             troop_failed = self._find_match_and_attack(method_id, ranked_fill)
@@ -486,6 +486,9 @@ class Bot:
             # Stop if troop was not found (after completing current cycle)
             if troop_failed:
                 break
+
+            # Upgrade walls while still on home, before nudging the camera out.
+            self._maybe_upgrade_walls(upgrade_walls)
 
             # Scroll down/out a bit now that we're on home
             self.input.scroll(*self._scroll_point(), 5)
