@@ -26,10 +26,16 @@ from app.ui.qt._constants import (
     BUILDER_BASE_PRIORITISE_LABELS,
 )
 from app.ui.qt.bot_controller import BotController
-from app.ui.qt.dialogs import RankedAttackConfirmDialog, show_error, show_under_development
+from app.ui.qt.dialogs import (
+    RankedAttackConfirmDialog,
+    show_bb_prioritise_help,
+    show_error,
+    show_under_development,
+)
 from app.ui.qt.theme import SPACING, TOKENS
 from app.ui.qt.widgets import (
     Card,
+    HelpButton,
     SectionTitle,
     StepperButton,
     ToggleSwitch,
@@ -238,6 +244,12 @@ class RunPage(QWidget):
         card.card_layout.addWidget(SectionTitle("Modes"))
         prior_row = QHBoxLayout()
         prior_row.addWidget(SectionTitle("Prioritise"))
+        prior_help = HelpButton(
+            lambda: show_bb_prioritise_help(self.window()),
+            parent=card,
+        )
+        prior_row.addWidget(prior_help, alignment=Qt.AlignmentFlag.AlignVCenter)
+        prior_row.addSpacing(SPACING["xs"])
         self._bb_prioritise_group = QButtonGroup(self)
         self._bb_prioritise_group.setExclusive(True)
         for i, label in enumerate(BUILDER_BASE_PRIORITISE_LABELS):

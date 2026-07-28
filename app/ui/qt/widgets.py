@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Optional
 
 from PySide6.QtCore import Qt, QRectF, QSize, QPointF
@@ -228,6 +229,25 @@ class StepperButton(QPushButton):
                 QPointF(cx + 4, cy - 2),
             ]
         painter.drawPolygon(QPolygonF(points))
+
+
+class HelpButton(QPushButton):
+    """Compact ? button that opens a help popup when clicked."""
+
+    def __init__(
+        self,
+        on_click: Callable[[], None],
+        *,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__("?", parent)
+        self.setProperty("role", "help")
+        self.setFixedSize(18, 18)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("What does each option do?")
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.clicked.connect(on_click)
 
 
 class VisibilityToggleButton(QPushButton):

@@ -169,6 +169,23 @@ QPushButton[role="stepper"]:pressed {{
 QPushButton[role="stepper"]:disabled {{
     background-color: {TOKENS['surface_hi']};
 }}
+QPushButton[role="help"] {{
+    background-color: transparent;
+    color: {TOKENS['text_muted']};
+    padding: 0;
+    min-height: 18px;
+    min-width: 18px;
+    max-height: 18px;
+    max-width: 18px;
+    border-radius: 9px;
+    border: 1px solid {TOKENS['text_muted']};
+    font-size: 11px;
+    font-weight: bold;
+}}
+QPushButton[role="help"]:hover {{
+    color: {TOKENS['text']};
+    border-color: {TOKENS['text']};
+}}
 QPushButton[role="icon"] {{
     background-color: {TOKENS['neutral_dark']};
     color: {TOKENS['text']};

@@ -36,6 +36,19 @@ def show_under_development(parent: Optional[QWidget]) -> None:
     )
 
 
+def show_bb_prioritise_help(parent: Optional[QWidget]) -> None:
+    QMessageBox.information(
+        parent,
+        "Prioritise loot",
+        (
+            "Choose what the bot optimises for after each attack:\n\n"
+            "• Gold — waits until 2 stars, then ends the battle.\n"
+            "• Both — waits until 1 star, then ends the battle.\n"
+            "• Elixir — surrenders immediately after deploying troops."
+        ),
+    )
+
+
 class RankedAttackConfirmDialog(QDialog):
     def __init__(self, parent: QWidget, minutes: int) -> None:
         super().__init__(parent)
