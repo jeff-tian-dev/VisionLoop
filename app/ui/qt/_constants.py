@@ -11,11 +11,12 @@ BUILDER_BASE_ATTACK_STRATEGIES: dict[str, int] = {
     "Baby Dragon": 5,
 }
 
+BUILDER_BASE_ATTACK_STRATEGIES_UNDER_DEV = ("Night Witches",)
+
 BUILDER_BASE_PRIORITISE_LABELS = ("Gold", "Both", "Elixir")
 
 STRIPE_LIFETIME_URL = "https://clashautoloot.duckdns.org/v1/checkout/lifetime"
 SUBSCRIBE_CHECKOUT_URL = "https://clashautoloot.duckdns.org/v1/checkout/subscribe"
-MONTH_EXTEND_CHECKOUT_URL = "https://clashautoloot.duckdns.org/v1/checkout/month-extend"
 
 UNPAIR_USER_ERRORS: dict[str, str] = {
     "empty": "No license key was entered.",

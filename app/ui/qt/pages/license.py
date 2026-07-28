@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.license import LicenseState, load_saved_key
-from app.ui.qt._constants import MONTH_EXTEND_CHECKOUT_URL, STRIPE_LIFETIME_URL, SUBSCRIBE_CHECKOUT_URL
+from app.ui.qt._constants import STRIPE_LIFETIME_URL, SUBSCRIBE_CHECKOUT_URL
 from app.ui.qt.bot_controller import BotController
 from app.ui.qt.dialogs import UnpairConfirmDialog, show_error
 from app.ui.qt.theme import SPACING, TOKENS
@@ -88,9 +88,6 @@ class LicensePage(QWidget):
         self._btn_subscribe = primary_button("Buy subscription", parent=self)
         self._btn_subscribe.clicked.connect(self._open_subscribe_checkout)
         footer.addWidget(self._btn_subscribe)
-        self._btn_monthly = neutral_button("Buy months (one-time)", parent=self)
-        self._btn_monthly.clicked.connect(self._open_monthly_checkout)
-        footer.addWidget(self._btn_monthly)
         self._btn_lifetime = neutral_button("Buy lifetime", parent=self)
         self._btn_lifetime.clicked.connect(self._open_lifetime_checkout)
         footer.addWidget(self._btn_lifetime)
@@ -212,18 +209,6 @@ class LicensePage(QWidget):
                 "Lifetime license",
                 "The lifetime checkout URL is not set in this build yet.\n\n"
                 "Contact support to purchase.",
-            )
-            return
-        webbrowser.open(url)
-
-    def _open_monthly_checkout(self) -> None:
-        url = (MONTH_EXTEND_CHECKOUT_URL or "").strip()
-        if not url:
-            QMessageBox.information(
-                self.window(),
-                "Monthly access",
-                "The monthly checkout URL is not set in this build yet.\n\n"
-                "Try Buy lifetime, or contact support.",
             )
             return
         webbrowser.open(url)

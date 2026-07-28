@@ -22,10 +22,11 @@ from app.services.trial import TRIAL_TOTAL_SECONDS, fetch_trial_status
 from app.ui.qt._constants import (
     ATTACK_STRATEGIES,
     BUILDER_BASE_ATTACK_STRATEGIES,
+    BUILDER_BASE_ATTACK_STRATEGIES_UNDER_DEV,
     BUILDER_BASE_PRIORITISE_LABELS,
 )
 from app.ui.qt.bot_controller import BotController
-from app.ui.qt.dialogs import RankedAttackConfirmDialog, show_error
+from app.ui.qt.dialogs import RankedAttackConfirmDialog, show_error, show_under_development
 from app.ui.qt.theme import SPACING, TOKENS
 from app.ui.qt.widgets import (
     Card,
@@ -99,21 +100,11 @@ class RunPage(QWidget):
             btn = segment_button(label, parent=wrapper)
             if label == "Home Village":
                 btn.setChecked(True)
-                self._village_group.addButton(btn, i)
-            elif label == "Builder Base":
-                btn.setCheckable(False)
-                btn.setProperty("underDevelopment", True)
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn.clicked.connect(self._on_builder_base_clicked)
-                btn.style().unpolish(btn)
-                btn.style().polish(btn)
+            self._village_group.addButton(btn, i)
             row.addWidget(btn)
         row.addStretch()
         self._village_group.idClicked.connect(self._on_village_changed)
         return wrapper
-
-    def _on_builder_base_clicked(self) -> None:
-        QMessageBox.information(self, "Builder Base", "Under development")
 
     def _is_builder_base(self) -> bool:
         btn = self._village_group.checkedButton()
@@ -155,6 +146,12 @@ class RunPage(QWidget):
             if label == "Baby Dragon":
                 btn.setChecked(True)
             self._bb_strategy_group.addButton(btn, i)
+            row.addWidget(btn)
+        for label in BUILDER_BASE_ATTACK_STRATEGIES_UNDER_DEV:
+            btn = segment_button(label, parent=card, under_development=True)
+            btn.clicked.connect(
+                lambda _checked=False: show_under_development(self.window())
+            )
             row.addWidget(btn)
         row.addStretch()
         card.card_layout.addLayout(row)
@@ -251,6 +248,23 @@ class RunPage(QWidget):
             prior_row.addWidget(btn)
         prior_row.addStretch()
         card.card_layout.addLayout(prior_row)
+
+        self._bb_upgrade_walls = ToggleSwitch(
+            "Upgrade walls", parent=card, under_development=True
+        )
+        card.card_layout.addWidget(self._bb_upgrade_walls)
+
+        mr_row = QHBoxLayout()
+        self._bb_multi_run = ToggleSwitch("Multi-run", parent=card, under_development=True)
+        mr_row.addWidget(self._bb_multi_run)
+        mr_row.addStretch()
+        edit_players = neutral_button("Edit player list", parent=card)
+        edit_players.setStyleSheet(f"color: {TOKENS['text_muted']};")
+        edit_players.clicked.connect(
+            lambda: show_under_development(self.window())
+        )
+        mr_row.addWidget(edit_players)
+        card.card_layout.addLayout(mr_row)
         return card
 
     def _confirm_bb_elixir_prioritise(self) -> bool:

@@ -4,7 +4,7 @@ import threading
 from typing import Callable, List, Optional, Tuple
 
 from app.config import ASPECT_16_10, ASPECT_16_9, Config
-from app.core.strategies import EdragStrategy, TroopSpamStrategy
+from app.core.strategies import AttackStrategy, EdragStrategy, TroopSpamStrategy, _EDRAG_DELAY
 from app.services.input import InputService
 from app.services.vision import (
     BOTTOM_HALF_BOT_TEMPLATES,
@@ -24,8 +24,23 @@ _HOME_VILLAGE_BUILDER_TEMPLATES = ("builder.png", "gbuilder.png")
 # Builder-menu drag when OCR misses ``wall`` (baseline coords → scaled via :meth:`Config.scale_point`).
 _WALL_OCR_RETRY_DRAG_BASELINE: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {
     ASPECT_16_10: ((1300, 280), (1300, 980)),
-    ASPECT_16_9: ((1300, 280), (1300, 880)),
+    ASPECT_16_9: ((1300, 280), (1300, 830)),
 }
+
+# Builder Base Baby Dragon deploy uses detected troop-bar count; same diamond edges as Edrags.
+_BB_BABY_DRAGON_RECLICK_WAIT = 10.0
+_BB_RETURN_HOME_TEMPLATE = "breturnhome.png"
+# Tighter non-overlap suppression for closely spaced BB troop-bar icons (default is 0.5).
+_BB_TEMPLATE_SUPPRESS_PAD = 0.1
+_BB_FULL_ELIXIR_CART_TEMPLATES = ("fullecart.png", "fullecart2.png", "fullecart3.png")
+_BB_COLLECT_TEMPLATE = "collect.png"
+_BB_STAR_BONUS_TEMPLATE = "bstar.png"
+_BB_BATTLE_STAR_TEMPLATE = "bbstar.png"
+_BB_BATTLE_MACHINE_TEMPLATE = "battlemachine.png"
+_BB_FLYING_MACHINE_TEMPLATE = "flyingmachine.png"
+_BB_GOLD_PRIORITISE_MIN_STARS = 2
+_BB_RETURN_HOME_END_BATTLE_RETRIES = 5
+_STAR_BONUS_THRESHOLD = 0.75
 
 
 class Bot:
@@ -88,6 +103,7 @@ class Bot:
 
         try:
             if multi_run_players is not None:
+                self._ensure_correct_village(builder_base=False)
                 queue = [p for p in multi_run_players if p.enabled]
                 if not queue:
                     raise RuntimeError("Multi-run: no players marked Run")
@@ -101,7 +117,11 @@ class Bot:
                     self._check_stop()
                     self._multi_run_builder_base_after_session()
                     self._check_stop()
+            elif self._builder_base:
+                self._ensure_correct_village(builder_base=True)
+                self._run_builder_base_loop(duration, star_bonus=star_bonus)
             else:
+                self._ensure_correct_village(builder_base=False)
                 self._run_loop(method, duration, star_bonus, ranked_fill, upgrade_walls)
         except InterruptedError:
             pass
@@ -225,20 +245,32 @@ class Bot:
                 return x, y
         return None, None
 
-    def _wall_menu_scroll_point(self) -> Optional[Tuple[int, int]]:
-        """Wheel anchor over the builder upgrade list (same X column as drag retry)."""
+    def _wall_menu_drag_to_bottom(self) -> None:
+        """Drag the builder upgrade list to its bottom so ``Wall`` (list end) is revealed.
+
+        Touch-style swipe up: click low in the list, drag to the top, release — the reverse of
+        the old wheel scroll. Baseline coords are scaled via :meth:`Config.scale_point`. Dragging
+        past the bottom is a harmless no-op, so this can be called repeatedly.
+        """
         pair = _WALL_OCR_RETRY_DRAG_BASELINE.get(self.config.aspect_key)
         if pair is None:
             logger.warning(
-                "wall menu scroll: unknown aspect %r; skipping scroll",
+                "wall menu drag: unknown aspect %r; skipping drag",
                 self.config.aspect_key,
             )
-            return None
-        p1_ref, p2_ref = pair
-        x_ref = p1_ref[0]
-        y_ref = (p1_ref[1] + p2_ref[1]) // 2
-        pt = self.config.scale_point([x_ref, y_ref])
-        return int(pt[0]), int(pt[1])
+            return
+        top_ref, bottom_ref = pair
+        top = self.config.scale_point([top_ref[0], top_ref[1]])
+        bottom = self.config.scale_point([bottom_ref[0], bottom_ref[1]])
+        x_top, y_top = int(top[0]), int(top[1])
+        x_bot, y_bot = int(bottom[0]), int(bottom[1])
+        # Press at the bottom of the list, drag up to the top, then release.
+        self.input.move(x_bot, y_bot)
+        self.input.mouse_down(x_bot, y_bot)
+        try:
+            self.input.human_move(x_bot, y_bot, x_top, y_top, duration=0.5)
+        finally:
+            self.input.mouse_up(x_top, y_top)
 
     def _wall_menu_drag_retry_nudge(self) -> None:
         """Vertical drag in the builder list when ``wall`` OCR misses (~0.5s eased move + hold pause)."""
@@ -269,8 +301,8 @@ class Bot:
         if frame is None:
             return False
         self._update_config_size(frame)
-        gx, gy = self.vision.find_template(frame, "hgoldfull.png", threshold=0.85)
-        ex, ey = self.vision.find_template(frame, "helixirfull.png", threshold=0.85)
+        gx, gy = VisionService.find_active_hgoldfull(frame)
+        ex, ey = VisionService.find_active_helixirfull(frame)
         return gx is not None or ex is not None
 
     def _maybe_upgrade_walls(self, upgrade_walls: bool) -> None:
@@ -315,17 +347,11 @@ class Bot:
         if not bx:
             return
         self.input.click(bx, by, pause=0.4)
-        scroll_pt = self._wall_menu_scroll_point()
-        if not scroll_pt:
-            return
-        sx, sy_scroll = scroll_pt
-        self.input.move(sx, sy_scroll)
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
+        # Drag the builder list to its bottom (Wall sits at the end) instead of wheel-scrolling.
+        for _ in range(8):
             self._check_stop()
-            # scroll amount must be positive (see InputService.scroll range(amount))
-            self.input.scroll(sx, sy_scroll, 3)
-            if self.stop_event.wait(0.1):
+            self._wall_menu_drag_to_bottom()
+            if self.stop_event.wait(0.15):
                 return
 
         wall_pt = None
@@ -499,6 +525,377 @@ class Bot:
             if star_bonus and self._is_star_bonus_claimed():
                 logger.info("Star bonus claimed (star icons no longer visible). Stopping.")
                 break
+
+    def _run_builder_base_loop(
+        self, duration_seconds: int, star_bonus: bool = False
+    ) -> None:
+        """Builder Base farming: Attack → Find Now → Baby Dragon deploy → end battle or surrender → Return Home."""
+        start_time = time.time()
+        cb = getattr(self, "_status_callback", None)
+
+        if self.stop_event.wait(1):
+            return
+        frame = self.window.screenshot()
+        if frame is not None:
+            self._update_config_size(frame)
+        empty_pt = self.config.get_point("empty")
+        self.input.click(*empty_pt, pause=0.2)
+        self.input.scroll(*self._scroll_point(), 20)
+        if self.stop_event.wait(random.uniform(0.1, 0.3)):
+            return
+
+        if star_bonus and self._is_bb_star_bonus_finished():
+            msg = (
+                "Builder Base star bonus: bstar.png not visible — "
+                "nothing to collect. Finishing without attacks."
+            )
+            logger.info(msg)
+            if cb:
+                cb(msg)
+            return
+
+        while time.time() - start_time < duration_seconds:
+            self._check_stop()
+
+            # Zoom out fully before each cycle
+            self.input.scroll(*self._scroll_point(), 20)
+            if self.stop_event.wait(random.uniform(0.1, 0.25)):
+                return
+
+            # Attack
+            ax, ay = self._wait_for_image("attack.png", timeout=10)
+            if not ax:
+                logger.warning("Builder Base: attack.png not found")
+                continue
+            self.input.click(ax, ay, pause=0.15)
+
+            # Find Now
+            fx, fy = self._wait_for_image("findnow.png", timeout=10)
+            if not fx:
+                logger.warning("Builder Base: findnow.png not found")
+                continue
+            self.input.click(fx, fy, pause=0.15)
+
+            # Wait for base load via Baby Dragon card (bottom half)
+            bx, by = self._wait_for_image("babydragon.png", timeout=30, error=False)
+            if not bx:
+                msg = "Builder Base: babydragon.png not found after Find Now"
+                logger.warning(msg)
+                if cb:
+                    cb(msg)
+                continue
+
+            # Zoom out a bit from center, then select Baby Dragon and deploy on diamond edges
+            frame = self.window.screenshot()
+            if frame is None:
+                continue
+            self._update_config_size(frame)
+            h, w = frame.shape[:2]
+            cx, cy = w // 2, h // 2
+            self.input.move(cx, cy)
+            if self.stop_event.wait(0.05):
+                return
+            self.input.scroll(cx, cy, 4)
+            if self.stop_event.wait(0.15):
+                return
+
+            frame = self.window.screenshot()
+            if frame is None:
+                continue
+            self._update_config_size(frame)
+            if not self._deploy_bb_baby_dragons(frame):
+                logger.warning("Builder Base: babydragon.png lost after zoom nudge / deploy failed")
+                continue
+
+            if self._loot_prioritise == "elixir":
+                self._bb_surrender_and_return_home()
+            elif self._loot_prioritise == "gold":
+                self._bb_gold_prioritise_end_battle_and_return_home()
+            else:
+                self._bb_end_battle_and_return_home()
+
+            self._bb_collect_elixir_cart_after_attack()
+
+            if star_bonus and self._is_bb_star_bonus_finished():
+                logger.info(
+                    "Builder Base star bonus finished (bstar.png no longer visible). Stopping."
+                )
+                break
+
+            if self.stop_event.wait(random.uniform(0.35, 0.6)):
+                return
+
+    def _bb_pan_down_left_from_center(self) -> None:
+        """Pan BB view down-left from screen center (~500px) to reveal the boat / elixir cart."""
+        self._check_stop()
+        frame = self.window.screenshot()
+        if frame is None or frame.size == 0:
+            return
+        self._update_config_size(frame)
+
+        h, w = frame.shape[:2]
+        cx = w // 2 + random.randint(-25, 25)
+        cy = h // 2 + random.randint(-25, 25)
+        cx = max(8, min(w - 8, cx))
+        cy = max(8, min(h - 8, cy))
+
+        self.input.move(cx, cy, 0)
+        self.input.mouse_up(cx, cy)
+        if self.stop_event.wait(0.06):
+            self._check_stop()
+
+        step = 500
+        x2 = max(8, min(w - 8, cx - step))
+        y2 = max(8, min(h - 8, cy + step))
+
+        self.input.mouse_down(cx, cy)
+        self.input.human_move(cx, cy, x2, y2, duration=random.uniform(0.35, 0.55))
+        self.input.mouse_up(x2, y2)
+
+        if self.stop_event.wait(0.45):
+            self._check_stop()
+
+    def _find_bb_full_elixir_cart(
+        self, attempts: int = 3
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """Up to ``attempts`` screenshots; try fullecart templates in order (top-right quadrant)."""
+        empty_pt = self.config.get_point("empty")
+        for _ in range(attempts):
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is not None:
+                self._update_config_size(frame)
+                roi = VisionService.top_right_quadrant_region(frame)
+                for template in _BB_FULL_ELIXIR_CART_TEMPLATES:
+                    x, y = self.vision.find_template(
+                        frame, template, threshold=0.8, region=roi
+                    )
+                    if x:
+                        return x, y
+            self.input.click(*empty_pt, pause=0.15)
+        return None, None
+
+    def _bb_collect_elixir_cart_after_attack(self) -> None:
+        """After a BB raid: dismiss popups, pan to cart, collect full elixir cart if visible."""
+        if self.stop_event.wait(0.35):
+            return
+
+        self.input.click(*self.config.get_point("empty"), pause=0.15)
+        if self.stop_event.wait(0.15):
+            return
+
+        self._bb_pan_down_left_from_center()
+
+        cx, cy = self._find_bb_full_elixir_cart(attempts=3)
+        if cx:
+            self.input.click(cx, cy, pause=0.2)
+            coll_x, coll_y = self._wait_for_image(
+                _BB_COLLECT_TEMPLATE, timeout=8, error=False
+            )
+            if coll_x:
+                self.input.click(coll_x, coll_y, pause=0.2)
+            else:
+                logger.warning("Builder Base: collect.png not found after elixir cart")
+        else:
+            logger.debug("Builder Base: fullecart not visible — skipping cart collect")
+
+        self.input.click(*self.config.get_point("empty"), pause=0.15)
+
+    def _deploy_bb_baby_dragons(self, frame) -> bool:
+        """Find all Baby Dragon icons, deploy on diamond edges, wait, then re-click saved icons."""
+        strategy = AttackStrategy(
+            self.input, self.vision, self.config, self.stop_event
+        )
+        roi = VisionService.bottom_half_region(frame)
+        centers = VisionService.find_all_template_centers(
+            frame,
+            "babydragon.png",
+            region=roi,
+            max_matches=12,
+            suppress_pad_frac=_BB_TEMPLATE_SUPPRESS_PAD,
+        )
+        if not centers:
+            return False
+
+        deploy_count = len(centers)
+        self.input.click(centers[0][0], centers[0][1], pause=0.3, rand=False)
+        if self.stop_event.wait(0.2):
+            return True
+
+        for px, py in strategy._even_diamond_top_perimeter_points(
+            frame, deploy_count, reserve_top_corner_slot=True
+        ):
+            self._check_stop()
+            self.input.click(px, py, pause=_EDRAG_DELAY, rand=False)
+
+        self._deploy_bb_battle_or_flying_machine(strategy)
+
+        if self._loot_prioritise != "elixir":
+            if self.stop_event.wait(_BB_BABY_DRAGON_RECLICK_WAIT):
+                return True
+
+            for x, y in centers:
+                self._check_stop()
+                self.input.click(x, y, pause=0.15, rand=False)
+        return True
+
+    def _deploy_bb_battle_or_flying_machine(self, strategy: AttackStrategy) -> None:
+        """One bar lookup: Battle Machine, else Flying Machine; deploy on a random diamond edge."""
+        frame = self.window.screenshot()
+        if frame is None:
+            return
+        self._update_config_size(frame)
+        roi = VisionService.bottom_half_region(frame)
+
+        tx, ty = self.vision.find_template(
+            frame, _BB_BATTLE_MACHINE_TEMPLATE, region=roi
+        )
+        if not tx:
+            tx, ty = self.vision.find_template(
+                frame, _BB_FLYING_MACHINE_TEMPLATE, region=roi
+            )
+        if not tx:
+            logger.debug(
+                "Builder Base: %s / %s not found on troop bar",
+                _BB_BATTLE_MACHINE_TEMPLATE,
+                _BB_FLYING_MACHINE_TEMPLATE,
+            )
+            return
+
+        px, py = strategy._random_diamond_perimeter_point(frame)
+        self.input.click(tx, ty, pause=0.3, rand=False)
+        if self.stop_event.wait(0.2):
+            return
+        self.input.click(px, py, pause=_EDRAG_DELAY, rand=False)
+
+    def _bb_end_battle_and_return_home(self) -> None:
+        """Wait for natural battle end, dismiss Okay, then tap BB Return Home."""
+        ex, ey = self._wait_for_image("endbattle.png", timeout=90, error=False)
+        if ex:
+            self.input.click(ex, ey, pause=0.15)
+        else:
+            logger.warning("Builder Base: endbattle.png not found")
+            return
+        self._bb_dismiss_okay_and_return_home()
+
+    def _bb_gold_prioritise_end_battle_and_return_home(self) -> None:
+        """Gold prioritise: wait for 2+ battle stars, then End Battle → Okay → Return Home."""
+        start = time.time()
+        timeout = 90
+        end_battle_clicked = False
+
+        while time.time() - start < timeout:
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                if self.stop_event.wait(0.5):
+                    return
+                continue
+            self._update_config_size(frame)
+            bot_roi = VisionService.bottom_half_region(frame)
+            stars = VisionService.find_all_template_centers(
+                frame,
+                _BB_BATTLE_STAR_TEMPLATE,
+                threshold=0.8,
+                region=bot_roi,
+                max_matches=3,
+                suppress_pad_frac=0.35,
+            )
+            if len(stars) >= _BB_GOLD_PRIORITISE_MIN_STARS:
+                bot_roi = VisionService.bottom_half_region(frame)
+                ex, ey = self.vision.find_template(
+                    frame, "endbattle.png", region=bot_roi
+                )
+                if ex:
+                    logger.info(
+                        "Builder Base (gold): %d bbstar.png — clicking endbattle",
+                        len(stars),
+                    )
+                    self.input.click(ex, ey, pause=0.15)
+                    end_battle_clicked = True
+                    break
+            if self.stop_event.wait(0.5):
+                return
+
+        if not end_battle_clicked:
+            logger.warning(
+                "Builder Base (gold): timed out waiting for %d+ %s",
+                _BB_GOLD_PRIORITISE_MIN_STARS,
+                _BB_BATTLE_STAR_TEMPLATE,
+            )
+            return
+
+        self._bb_dismiss_okay_and_return_home()
+
+    def _bb_dismiss_okay_and_return_home(
+        self,
+        *,
+        retry_battle_template: str = "endbattle.png",
+        max_retries: int = _BB_RETURN_HOME_END_BATTLE_RETRIES,
+    ) -> None:
+        """Dismiss Okay, tap Return Home; retry battle-end + Okay if Return Home stays hidden."""
+        for attempt in range(max_retries + 1):
+            self._check_stop()
+            if attempt > 0:
+                bx, by = self._wait_for_image(
+                    retry_battle_template, timeout=3, error=False
+                )
+                if bx:
+                    self.input.click(bx, by, pause=0.15)
+                else:
+                    logger.debug(
+                        "Builder Base: %s retry %d/%d — control not visible",
+                        retry_battle_template,
+                        attempt,
+                        max_retries,
+                    )
+
+            okay_timeout = 10 if attempt == 0 else 5
+            ox, oy = self._wait_for_image(
+                "okay.png", timeout=okay_timeout, error=False
+            )
+            if ox:
+                self.input.click(ox, oy, pause=0.15)
+
+            rx, ry = self._wait_for_image(
+                _BB_RETURN_HOME_TEMPLATE, timeout=15, error=False
+            )
+            if rx:
+                self.input.click(rx, ry, pause=0.2)
+                if attempt > 0:
+                    logger.info(
+                        "Builder Base: return home after %d %s retry(ies)",
+                        attempt,
+                        retry_battle_template,
+                    )
+                return
+
+            if attempt < max_retries:
+                logger.info(
+                    "Builder Base: %s not found — retrying %s + okay (%d/%d)",
+                    _BB_RETURN_HOME_TEMPLATE,
+                    retry_battle_template,
+                    attempt + 1,
+                    max_retries,
+                )
+
+        logger.warning(
+            "Builder Base: %s not found after %d %s retries",
+            _BB_RETURN_HOME_TEMPLATE,
+            max_retries,
+            retry_battle_template,
+        )
+
+    def _bb_surrender_and_return_home(self) -> None:
+        """Elixir prioritise: surrender right after deploy, then Okay + Return Home."""
+        sx, sy = self._wait_for_image("surrender.png", timeout=10, error=False)
+        if sx:
+            self.input.click(sx, sy, pause=0.15)
+        else:
+            logger.warning("Builder Base (elixir): surrender.png not found")
+            return
+
+        self._bb_dismiss_okay_and_return_home(retry_battle_template="surrender.png")
 
     def _find_match_and_attack(self, method_id: int, ranked_fill: bool = False) -> bool:
         """Returns True if the bot should stop (troop not found, or ranked limit reached)."""
@@ -743,7 +1140,6 @@ class Bot:
 
     def _is_star_bonus_claimed(self) -> bool:
         """True if neither emptystar nor glowstar matches strongly (bonus claimed / not shown)."""
-        STAR_BONUS_THRESHOLD = 0.75
         frame = self.window.screenshot()
         if frame is None:
             return False
@@ -752,9 +1148,21 @@ class Bot:
             _, _, confidence = self.vision.find_template_with_confidence(
                 frame, template, threshold=0.0
             )
-            if confidence >= STAR_BONUS_THRESHOLD:
+            if confidence >= _STAR_BONUS_THRESHOLD:
                 return False
         return True
+
+    def _is_bb_star_bonus_finished(self) -> bool:
+        """True when ``bstar.png`` is not visible in the bottom half (BB star bonus attacks done)."""
+        frame = self.window.screenshot()
+        if frame is None:
+            return False
+        self._update_config_size(frame)
+        bot_roi = VisionService.bottom_half_region(frame)
+        _, _, confidence = self.vision.find_template_with_confidence(
+            frame, _BB_STAR_BONUS_TEMPLATE, threshold=0.0, region=bot_roi
+        )
+        return confidence < _STAR_BONUS_THRESHOLD
 
     def _home_screen_recovery(self):
         """Ensures we are back at home screen. Dismisses any Okay popup before considering home."""
@@ -894,6 +1302,70 @@ class Bot:
                 return None, None
         return None, None
 
+    def _detect_village_type(self, frame=None) -> Optional[str]:
+        """Return ``\"home\"``, ``\"builder\"``, or ``None`` from top-half builder portraits."""
+        if frame is None:
+            frame = self.window.screenshot()
+        if frame is None or frame.size == 0:
+            return None
+        self._update_config_size(frame)
+        top_roi = VisionService.top_half_region(frame)
+        mx, my = self.vision.find_template(frame, "mbuilder.png", region=top_roi)
+        if mx:
+            return "builder"
+        hx, hy = self._find_home_village_builder(frame, top_roi)
+        if hx:
+            return "home"
+        return None
+
+    def _go_to_builder_base_with_boat(self) -> bool:
+        """Home Village → Builder Base via ``boat.png``."""
+        self._check_stop()
+        bx, by = self._wait_for_image("boat.png", timeout=15, error=False)
+        if not bx:
+            logger.warning("boat.png not found — cannot switch to Builder Base")
+            return False
+        self.input.click(bx, by, pause=0.25)
+        if self.stop_event.wait(1.0):
+            return False
+        mx, my = self._wait_for_image("mbuilder.png", timeout=15, error=False)
+        if not mx:
+            logger.warning("mbuilder.png not found after boat — may still be in Home Village")
+            return False
+        return True
+
+    def _ensure_correct_village(self, builder_base: bool) -> None:
+        """Before farming: switch villages if the wrong builder portrait is showing."""
+        self._check_stop()
+        self.input.click(*self.config.get_point("empty"), pause=0.15)
+        if self.stop_event.wait(0.2):
+            return
+
+        village = self._detect_village_type()
+        if builder_base:
+            if village == "builder":
+                return
+            if village == "home":
+                logger.info(
+                    "Startup: in Home Village but Builder Base was selected — taking boat"
+                )
+                self._go_to_builder_base_with_boat()
+            else:
+                logger.warning(
+                    "Startup: could not detect village (expected Builder Base)"
+                )
+            return
+
+        if village == "home":
+            return
+        if village == "builder":
+            logger.info(
+                "Startup: in Builder Base but Home Village was selected — leaving (nboat)"
+            )
+            self._leave_builder_base_with_nboat()
+        else:
+            logger.warning("Startup: could not detect village (expected Home Village)")
+
     def _leave_builder_base_with_nboat(self, settle_before_drag: bool = True) -> None:
         """
         Pan down-left from screen center (~500px), then click ``nboat.png`` to return to Home Village.
@@ -908,38 +1380,12 @@ class Bot:
             if self.stop_event.wait(0.75):
                 self._check_stop()
 
-        frame = self.window.screenshot()
-        if frame is None or frame.size == 0:
-            return
-        self._update_config_size(frame)
-
         logger.info("Leaving Builder Base (drag + nboat)")
         cb = getattr(self, "_status_callback", None)
         if cb:
             cb("Multi-run: leaving Builder Base (nboat)")
 
-        self._check_stop()
-        h, w = frame.shape[:2]
-        cx = w // 2 + random.randint(-25, 25)
-        cy = h // 2 + random.randint(-25, 25)
-        cx = max(8, min(w - 8, cx))
-        cy = max(8, min(h - 8, cy))
-
-        self.input.move(cx, cy, 0)
-        self.input.mouse_up(cx, cy)
-        if self.stop_event.wait(0.06):
-            self._check_stop()
-
-        step = 500
-        x2 = max(8, min(w - 8, cx - step))
-        y2 = max(8, min(h - 8, cy + step))
-
-        self.input.mouse_down(cx, cy)
-        self.input.human_move(cx, cy, x2, y2, duration=random.uniform(0.35, 0.55))
-        self.input.mouse_up(x2, y2)
-
-        if self.stop_event.wait(0.45):
-            self._check_stop()
+        self._bb_pan_down_left_from_center()
 
         nx, ny = self._wait_for_image("nboat.png", timeout=12, error=False)
         if nx:
@@ -1191,8 +1637,10 @@ class Bot:
         timeout: int = 10,
         error: bool = True,
         threshold: float = 0.8,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        region_from_frame: Optional[Callable[[object], Tuple[int, int, int, int]]] = None,
     ) -> Tuple[Optional[int], Optional[int]]:
-        """First match among `templates` wins (same frame); order only matters if both match."""
+        """First ordered template match wins (checked left-to-right each frame)."""
         start = time.time()
         while time.time() - start < timeout:
             self._check_stop()
@@ -1200,12 +1648,17 @@ class Bot:
             if frame is None:
                 continue
             self._update_config_size(frame)
+            search_region = region
+            if search_region is None and region_from_frame is not None:
+                search_region = region_from_frame(frame)
             for template in templates:
-                search_region = self._search_region_for_template(
-                    frame, template, None, None, 200
-                )
+                tpl_region = search_region
+                if tpl_region is None:
+                    tpl_region = self._search_region_for_template(
+                        frame, template, None, None, 200
+                    )
                 x, y = self.vision.find_template(
-                    frame, template, threshold=threshold, region=search_region
+                    frame, template, threshold=threshold, region=tpl_region
                 )
                 if x:
                     return x, y

@@ -28,6 +28,14 @@ def show_error(parent: Optional[QWidget], title: str, message: str) -> None:
     QMessageBox.critical(parent, title, message)
 
 
+def show_under_development(parent: Optional[QWidget]) -> None:
+    QMessageBox.information(
+        parent,
+        "Under development",
+        "This feature is under development.",
+    )
+
+
 class RankedAttackConfirmDialog(QDialog):
     def __init__(self, parent: QWidget, minutes: int) -> None:
         super().__init__(parent)

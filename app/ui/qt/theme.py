@@ -129,13 +129,7 @@ QPushButton[role="segment"]:checked {{
 }}
 QPushButton[role="segment"][underDevelopment="true"] {{
     color: #4a5568;
-    border-color: {TOKENS['border']};
-    background-color: {TOKENS['surface']};
-}}
-QPushButton[role="segment"][underDevelopment="true"]:hover {{
-    color: #6b7280;
-    border-color: {TOKENS['border_hi']};
-    background-color: {TOKENS['surface_hi']};
+    border-color: #3f3f46;
 }}
 QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
     background-color: {TOKENS['surface_hi']};

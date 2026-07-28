@@ -74,7 +74,11 @@ def configure_tesseract() -> None:
             os.environ["TESSDATA_PREFIX"] = str(td.resolve()) + os.sep
             logger.debug("Tesseract bundled at %s, tessdata=%s", bundled, td)
         else:
-            logger.warning("Frozen build: tesseract.exe not found under %s", base)
+            logger.error(
+                "Frozen build: tesseract.exe not found under %s. OCR will not work; "
+                "the Tesseract binary was not bundled/extracted correctly.",
+                base,
+            )
         return
 
     win = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
@@ -85,7 +89,7 @@ def configure_tesseract() -> None:
         logger.debug("Tesseract dev install: %s, tessdata=%s", win, td)
         return
 
-    logger.warning(
+    logger.error(
         "Tesseract not configured (install with winget install UB-Mannheim.TesseractOCR "
-        "or set TESSERACT_CMD)."
+        "or set TESSERACT_CMD). OCR will not work until Tesseract is available."
     )

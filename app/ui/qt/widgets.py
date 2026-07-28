@@ -91,11 +91,21 @@ class StatusDot(QWidget):
 
 
 class ToggleSwitch(QCheckBox):
-    def __init__(self, text: str = "", *, parent: Optional[QWidget] = None, danger: bool = False) -> None:
+    def __init__(
+        self,
+        text: str = "",
+        *,
+        parent: Optional[QWidget] = None,
+        danger: bool = False,
+        under_development: bool = False,
+    ) -> None:
         super().__init__(text, parent)
         self.setObjectName("ToggleSwitch")
         self._danger = danger
+        self._under_development = under_development
         self.setFixedHeight(24)
+        if under_development:
+            self.setChecked(False)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -103,24 +113,38 @@ class ToggleSwitch(QCheckBox):
         track_w, track_h = 40, 22
         x0 = 0
         y0 = (self.height() - track_h) // 2
-        on_color = QColor(TOKENS["danger"] if self._danger else TOKENS["primary"])
-        off_color = QColor("#3f3f46")
-        track_color = on_color if self.isChecked() else off_color
+        if self._under_development:
+            on_color = QColor("#3f3f46")
+            off_color = QColor("#2d2d33")
+            text_color = QColor("#4a5568")
+        else:
+            on_color = QColor(TOKENS["danger"] if self._danger else TOKENS["primary"])
+            off_color = QColor("#3f3f46")
+            text_color = QColor(TOKENS["danger"] if self._danger else TOKENS["text"])
+        track_color = on_color if self.isChecked() and not self._under_development else off_color
         painter.setPen(Qt.NoPen)
         painter.setBrush(track_color)
         painter.drawRoundedRect(x0, y0, track_w, track_h, track_h / 2, track_h / 2)
         knob_d = 18
-        knob_x = x0 + track_w - knob_d - 2 if self.isChecked() else x0 + 2
+        knob_x = x0 + track_w - knob_d - 2 if self.isChecked() and not self._under_development else x0 + 2
         knob_y = y0 + (track_h - knob_d) // 2
-        painter.setBrush(QColor("#ffffff"))
+        painter.setBrush(QColor("#a0a0a8" if self._under_development else "#ffffff"))
         painter.drawEllipse(knob_x, knob_y, knob_d, knob_d)
         if self.text():
-            painter.setPen(QColor(TOKENS["danger"] if self._danger else TOKENS["text"]))
+            painter.setPen(text_color)
             font = painter.font()
             font.setPointSize(10)
             painter.setFont(font)
             text_rect = QRectF(track_w + 10, 0, self.width() - track_w - 10, self.height())
             painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.text())
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._under_development:
+            from app.ui.qt.dialogs import show_under_development
+
+            show_under_development(self.window())
+            return
+        super().mousePressEvent(event)
 
     def sizeHint(self) -> QSize:  # noqa: N802
         text_w = self.fontMetrics().horizontalAdvance(self.text()) + 8 if self.text() else 0
@@ -154,9 +178,17 @@ def chip_button(text: str, *, parent: Optional[QWidget] = None) -> QPushButton:
     return _styled_button(text, "chip", parent)
 
 
-def segment_button(text: str, *, parent: Optional[QWidget] = None) -> QPushButton:
+def segment_button(
+    text: str, *, parent: Optional[QWidget] = None, under_development: bool = False
+) -> QPushButton:
     btn = _styled_button(text, "segment", parent)
-    btn.setCheckable(True)
+    if under_development:
+        btn.setCheckable(False)
+        btn.setProperty("underDevelopment", True)
+    else:
+        btn.setCheckable(True)
+    btn.style().unpolish(btn)
+    btn.style().polish(btn)
     btn.setMinimumWidth(int(btn.sizeHint().width() * 1.10))
     return btn
 

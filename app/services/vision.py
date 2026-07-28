@@ -107,6 +107,12 @@ BOTTOM_HALF_BOT_TEMPLATES = frozenset(
         "removewall.png",
         "removewallfake.png",
         "upgrademore.png",
+        "babydragon.png",
+        "findnow.png",
+        "bstar.png",
+        "bbstar.png",
+        "battlemachine.png",
+        "flyingmachine.png",
     }
 )
 
@@ -116,6 +122,9 @@ TOP_HALF_BOT_TEMPLATES = frozenset(
         "mbuilder.png",
         "builder.png",
         "gbuilder.png",
+        "fullecart.png",
+        "fullecart2.png",
+        "fullecart3.png",
     }
 )
 
@@ -144,6 +153,22 @@ _WALL_MENU_LETTER_CC_AT_BASELINE: Dict[str, Tuple[int, int]] = {
 
 class VisionService:
     """Handles image recognition and processing."""
+
+    # Guards the per-frame "Tesseract not found" ERROR so a persistent OCR failure is
+    # logged once (loudly) instead of spamming the rotating log many times per second.
+    _tesseract_missing_logged: bool = False
+
+    @staticmethod
+    def _log_tesseract_missing() -> None:
+        """Log the Tesseract-not-found error once (subsequent OCR calls stay silent)."""
+        if VisionService._tesseract_missing_logged:
+            return
+        VisionService._tesseract_missing_logged = True
+        logger.error(
+            "Tesseract executable not found; OCR is disabled and all word/number reads "
+            "will return empty. Install Tesseract and ensure it is on PATH or bundled "
+            "(e.g. Windows installer from UB Mannheim). This is logged once per run."
+        )
 
     @staticmethod
     def _template_scale_xy(screen_img: np.ndarray) -> Tuple[float, float]:
@@ -187,6 +212,14 @@ class VisionService:
         h, w = screen_img.shape[:2]
         x0 = w // 2
         return (x0, 0, w - x0, h)
+
+    @staticmethod
+    def top_right_quadrant_region(screen_img: np.ndarray) -> Tuple[int, int, int, int]:
+        """ROI (x, y, w, h) covering the top-right quarter of the screenshot."""
+        h, w = screen_img.shape[:2]
+        x0 = w // 2
+        y1 = h // 2
+        return (x0, 0, w - x0, y1)
 
     @staticmethod
     def find_template(
@@ -291,6 +324,30 @@ class VisionService:
         except Exception as e:
             logger.error(f"Error in find_template_with_confidence: {e}")
             return None, None, 0.0
+
+    @staticmethod
+    def find_all_template_centers(
+        screen_img: np.ndarray,
+        template_name: str,
+        threshold: float = 0.8,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        max_matches: int = 12,
+        suppress_pad_frac: float = 0.5,
+    ) -> List[Tuple[int, int]]:
+        """All non-overlapping template hits as ``(center_x, center_y)`` centers."""
+        matches = VisionService._find_template_matches(
+            screen_img,
+            template_name,
+            threshold,
+            region,
+            max_matches=max_matches,
+            suppress_pad_frac=suppress_pad_frac,
+        )
+        return [
+            (int(left) + int(tw) // 2, int(top) + int(th) // 2)
+            for left, top, tw, th, _score in matches
+        ]
 
     @staticmethod
     def _template_best_match(
@@ -407,7 +464,7 @@ class VisionService:
         screen_img: np.ndarray,
         region: Optional[Tuple[int, int, int, int]] = None,
         *,
-        template_threshold: float = 0.8,
+        template_threshold: float = 0.75,
         lime_threshold: float = 0.30,
         max_matches: int = 32,
     ) -> Tuple[Optional[int], Optional[int]]:
@@ -467,11 +524,103 @@ class VisionService:
         return float(cv2.countNonZero(mask)) / float(total) if total > 0 else 0.0
 
     @staticmethod
+    def pink_fraction(
+        bgr: np.ndarray,
+        *,
+        hue_lo: int = 130,
+        hue_hi: int = 175,
+        sat_floor: int = 80,
+        val_floor: int = 80,
+    ) -> float:
+        """
+        Fraction of pixels in pink/magenta hue (OpenCV H 0–179) with saturation and value
+        at least ``sat_floor`` / ``val_floor``.
+        """
+        if bgr is None or bgr.size == 0 or bgr.ndim != 3:
+            return 0.0
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        sf = max(0, min(255, int(sat_floor)))
+        vf = max(0, min(255, int(val_floor)))
+        mask = cv2.inRange(hsv, (int(hue_lo), sf, vf), (int(hue_hi), 255, 255))
+        total = int(bgr.shape[0]) * int(bgr.shape[1])
+        return float(cv2.countNonZero(mask)) / float(total) if total > 0 else 0.0
+
+    @staticmethod
+    def find_active_hgoldfull(
+        screen_img: np.ndarray,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        template_threshold: float = 0.85,
+        yellow_threshold: float = 0.50,
+        max_matches: int = 8,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Locate a full gold storage hero-bar icon via ``hgoldfull.png`` template matching
+        plus per-hit yellow color verification.
+        """
+        matches = VisionService._find_template_matches(
+            screen_img,
+            "hgoldfull.png",
+            template_threshold,
+            region,
+            max_matches=max_matches,
+        )
+        if not matches:
+            return None, None
+
+        frame_h, frame_w = screen_img.shape[:2]
+        for left, top, tw, th, _score in sorted(matches, key=lambda m: m[4], reverse=True):
+            x0 = max(0, min(int(left), frame_w))
+            y0 = max(0, min(int(top), frame_h))
+            x1 = max(0, min(int(left) + int(tw), frame_w))
+            y1 = max(0, min(int(top) + int(th), frame_h))
+            crop = screen_img[y0:y1, x0:x1]
+            if VisionService.yellow_fraction(crop) < yellow_threshold:
+                continue
+            return int(left) + int(tw) // 2, int(top) + int(th) // 2
+        return None, None
+
+    @staticmethod
+    def find_active_helixirfull(
+        screen_img: np.ndarray,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        template_threshold: float = 0.85,
+        pink_threshold: float = 0.50,
+        max_matches: int = 8,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Locate a full elixir storage hero-bar icon via ``helixirfull.png`` template matching
+        plus per-hit pink color verification.
+        """
+        matches = VisionService._find_template_matches(
+            screen_img,
+            "helixirfull.png",
+            template_threshold,
+            region,
+            max_matches=max_matches,
+        )
+        if not matches:
+            return None, None
+
+        frame_h, frame_w = screen_img.shape[:2]
+        for left, top, tw, th, _score in sorted(matches, key=lambda m: m[4], reverse=True):
+            x0 = max(0, min(int(left), frame_w))
+            y0 = max(0, min(int(top), frame_h))
+            x1 = max(0, min(int(left) + int(tw), frame_w))
+            y1 = max(0, min(int(top) + int(th), frame_h))
+            crop = screen_img[y0:y1, x0:x1]
+            if VisionService.pink_fraction(crop) < pink_threshold:
+                continue
+            return int(left) + int(tw) // 2, int(top) + int(th) // 2
+        return None, None
+
+    @staticmethod
     def find_active_removewall(
         screen_img: np.ndarray,
         region: Optional[Tuple[int, int, int, int]] = None,
         *,
-        template_threshold: float = 0.8,
+        template_threshold: float = 0.75,
         yellow_threshold: float = 0.30,
         max_matches: int = 32,
     ) -> Tuple[Optional[int], Optional[int]]:
@@ -616,6 +765,7 @@ class VisionService:
         region: Optional[Tuple[int, int, int, int]] = None,
         *,
         max_matches: int = 2,
+        suppress_pad_frac: float = 0.5,
     ) -> List[Tuple[int, int, int, int, float]]:
         """Up to ``max_matches`` non-overlapping ``matchTemplate`` hits: ``(left, top, t_w, t_h, score)``."""
         try:
@@ -653,10 +803,12 @@ class VisionService:
                 left = offset_x + int(max_loc[0])
                 top = offset_y + int(max_loc[1])
                 matches.append((left, top, t_w, t_h, score))
-                y0 = max(0, max_loc[1] - t_h // 2)
-                y1 = min(work.shape[0], max_loc[1] + t_h + t_h // 2)
-                x0 = max(0, max_loc[0] - t_w // 2)
-                x1 = min(work.shape[1], max_loc[0] + t_w + t_w // 2)
+                pad_x = max(0, int(round(t_w * suppress_pad_frac)))
+                pad_y = max(0, int(round(t_h * suppress_pad_frac)))
+                y0 = max(0, max_loc[1] - pad_y)
+                y1 = min(work.shape[0], max_loc[1] + t_h + pad_y)
+                x0 = max(0, max_loc[0] - pad_x)
+                x1 = min(work.shape[1], max_loc[0] + t_w + pad_x)
                 work[y0:y1, x0:x1] = 0.0
             return matches
         except Exception as e:
@@ -1353,10 +1505,7 @@ class VisionService:
         try:
             raw = pytesseract.image_to_boxes(pil, config=tesseract_config)
         except pytesseract.TesseractNotFoundError:
-            logger.error(
-                "Tesseract executable not found. Install Tesseract and ensure it is on PATH "
-                "(e.g. Windows installer from UB Mannheim)."
-            )
+            VisionService._log_tesseract_missing()
             return []
 
         mono_h = int(mono.shape[0])
@@ -1514,10 +1663,7 @@ class VisionService:
                 pil, output_type=pytesseract.Output.DICT, config=tesseract_config
             )
         except pytesseract.TesseractNotFoundError:
-            logger.error(
-                "Tesseract executable not found. Install Tesseract and ensure it is on PATH "
-                "(e.g. Windows installer from UB Mannheim)."
-            )
+            VisionService._log_tesseract_missing()
             return []
 
         VisionService.save_hud_ocr_debug_outputs(

@@ -320,6 +320,90 @@ class AttackStrategy:
         fh, fw = frame.shape[:2]
         return self._quantize_deploy_to_frame(xf, yf, fw, fh)
 
+    @staticmethod
+    def _point_on_polyline_at_distance(
+        vertices: List[Tuple[float, float]], distance: float
+    ) -> Tuple[float, float]:
+        """Point ``distance`` pixels along a polyline from the first vertex."""
+        if not vertices:
+            return 0.0, 0.0
+        if len(vertices) == 1:
+            return float(vertices[0][0]), float(vertices[0][1])
+
+        remaining = max(0.0, float(distance))
+        x0, y0 = float(vertices[0][0]), float(vertices[0][1])
+        for i in range(len(vertices) - 1):
+            x1, y1 = float(vertices[i + 1][0]), float(vertices[i + 1][1])
+            seg_len = math.hypot(x1 - x0, y1 - y0)
+            if seg_len <= 0.0:
+                x0, y0 = x1, y1
+                continue
+            if remaining <= seg_len:
+                t = remaining / seg_len
+                return x0 + (x1 - x0) * t, y0 + (y1 - y0) * t
+            remaining -= seg_len
+            x0, y0 = x1, y1
+        return x0, y0
+
+    def _even_diamond_top_perimeter_points(
+        self,
+        frame,
+        count: int,
+        *,
+        deviation_frac: float = 0.1,
+        reserve_top_corner_slot: bool = False,
+    ) -> List[Tuple[int, int]]:
+        """
+        Evenly spaced deploy clicks along left→top→right diamond edges (Edrag front),
+        with ±``deviation_frac`` jitter per slot and corner margin clamping.
+
+        When ``reserve_top_corner_slot`` is set, spacing uses ``count + 1`` slots and the
+        slot nearest the top vertex is left empty (virtual troop at the apex).
+        """
+        if count <= 0:
+            return []
+
+        vertices = [tuple(self._point(corner)) for corner in ("left", "top", "right")]
+        seg_lens = [
+            math.hypot(vertices[i + 1][0] - vertices[i][0], vertices[i + 1][1] - vertices[i][1])
+            for i in range(len(vertices) - 1)
+        ]
+        total_len = sum(seg_lens)
+        margin = float(self.config.scale_scalar(_EDRAG_CORNER_MARGIN))
+        start_d = margin
+        end_d = total_len - margin
+        span = end_d - start_d
+        fh, fw = frame.shape[:2]
+
+        if span <= 0.0:
+            mid = self._point_on_polyline_at_distance(vertices, total_len / 2.0)
+            return [self._quantize_deploy_to_frame(mid[0], mid[1], fw, fh)]
+
+        slot_count = count + 1 if reserve_top_corner_slot else count
+        spacing = span / slot_count
+        slot_distances: List[float] = []
+        for i in range(slot_count):
+            d = start_d + (i + 0.5) * spacing
+            d += random.uniform(-deviation_frac, deviation_frac) * spacing
+            d = max(start_d, min(end_d, d))
+            slot_distances.append(d)
+
+        skip_idx: Optional[int] = None
+        if reserve_top_corner_slot and slot_count > 1:
+            top_d = seg_lens[0]
+            skip_idx = min(
+                range(slot_count),
+                key=lambda i: abs(slot_distances[i] - top_d),
+            )
+
+        out: List[Tuple[int, int]] = []
+        for i, d in enumerate(slot_distances):
+            if i == skip_idx:
+                continue
+            xf, yf = self._point_on_polyline_at_distance(vertices, d)
+            out.append(self._quantize_deploy_to_frame(xf, yf, fw, fh))
+        return out
+
     def _deploy_diamond_perimeter_troop(
         self,
         frame,
