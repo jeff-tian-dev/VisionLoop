@@ -352,10 +352,13 @@ class AttackStrategy:
         *,
         deviation_frac: float = 0.1,
         reserve_top_corner_slot: bool = False,
+        reverse: bool = False,
     ) -> List[Tuple[int, int]]:
         """
         Evenly spaced deploy clicks along left→top→right diamond edges (Edrag front),
         with ±``deviation_frac`` jitter per slot and corner margin clamping.
+
+        When ``reverse`` is set, the sweep runs right→top→left instead.
 
         When ``reserve_top_corner_slot`` is set, spacing uses ``count + 1`` slots and the
         slot nearest the top vertex is left empty (virtual troop at the apex).
@@ -363,7 +366,8 @@ class AttackStrategy:
         if count <= 0:
             return []
 
-        vertices = [tuple(self._point(corner)) for corner in ("left", "top", "right")]
+        corners = ("right", "top", "left") if reverse else ("left", "top", "right")
+        vertices = [tuple(self._point(corner)) for corner in corners]
         seg_lens = [
             math.hypot(vertices[i + 1][0] - vertices[i][0], vertices[i + 1][1] - vertices[i][1])
             for i in range(len(vertices) - 1)
@@ -400,6 +404,38 @@ class AttackStrategy:
         for i, d in enumerate(slot_distances):
             if i == skip_idx:
                 continue
+            xf, yf = self._point_on_polyline_at_distance(vertices, d)
+            out.append(self._quantize_deploy_to_frame(xf, yf, fw, fh))
+        return out
+
+    def _random_diamond_top_perimeter_points(
+        self,
+        frame,
+        count: int,
+    ) -> List[Tuple[int, int]]:
+        """Random deploy clicks along left→top→right diamond edges (front arc)."""
+        if count <= 0:
+            return []
+
+        vertices = [tuple(self._point(corner)) for corner in ("left", "top", "right")]
+        seg_lens = [
+            math.hypot(vertices[i + 1][0] - vertices[i][0], vertices[i + 1][1] - vertices[i][1])
+            for i in range(len(vertices) - 1)
+        ]
+        total_len = sum(seg_lens)
+        margin = float(self.config.scale_scalar(_EDRAG_CORNER_MARGIN))
+        start_d = margin
+        end_d = total_len - margin
+        span = end_d - start_d
+        fh, fw = frame.shape[:2]
+
+        if span <= 0.0:
+            mid = self._point_on_polyline_at_distance(vertices, total_len / 2.0)
+            return [self._quantize_deploy_to_frame(mid[0], mid[1], fw, fh)]
+
+        out: List[Tuple[int, int]] = []
+        for _ in range(count):
+            d = random.uniform(start_d, end_d)
             xf, yf = self._point_on_polyline_at_distance(vertices, d)
             out.append(self._quantize_deploy_to_frame(xf, yf, fw, fh))
         return out

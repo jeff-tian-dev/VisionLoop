@@ -131,6 +131,10 @@ QPushButton[role="segment"][underDevelopment="true"] {{
     color: #4a5568;
     border-color: #3f3f46;
 }}
+QPushButton[role="segment"]:disabled {{
+    color: #4a5568;
+    border-color: #3f3f46;
+}}
 QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
     background-color: {TOKENS['surface_hi']};
     border: 1px solid {TOKENS['border_hi']};

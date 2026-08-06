@@ -94,6 +94,7 @@ class LicenseClient:
     def __init__(self, api_base: str = _API_BASE) -> None:
         self._validate_url = f"{api_base}/v1/validate"
         self._unpair_url = f"{api_base}/v1/unpair"
+        self._portal_url = f"{api_base}/v1/portal"
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
 
@@ -128,6 +129,22 @@ class LicenseClient:
             self._unpair_url,
             json=payload,
             timeout=(5, 10),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def portal(self, license_key: str, bot_version: str = "1.0.0") -> dict:
+        """POST /v1/portal. Returns {\"ok\": bool, \"url\"?: str, \"reason\"?: str}."""
+        normalized_key = license_key.strip().upper()
+        payload = {
+            "license_key": normalized_key,
+            "machine_fingerprint": HardwareFingerprint.compute(),
+            "bot_version": bot_version,
+        }
+        resp = self._session.post(
+            self._portal_url,
+            json=payload,
+            timeout=(5, 20),
         )
         resp.raise_for_status()
         return resp.json()
@@ -337,6 +354,25 @@ class LicenseManager:
         if bool(out.get("ok")):
             return True, ""
         return False, str(out.get("reason", "failed"))
+
+    def try_portal_url(self, license_key: str) -> tuple[str, str]:
+        """Ask the server for a Stripe customer-portal link. Returns (url, reason_code_or_empty)."""
+        stripped = license_key.strip().upper()
+        if not stripped:
+            return "", "empty"
+        try:
+            out = self._client.portal(stripped, self._bot_version)
+        except requests.RequestException as exc:
+            resp = getattr(exc, "response", None)
+            if resp is not None and resp.status_code == 422:
+                return "", "invalid_format"
+            logger.warning("Billing portal request failed: %s", exc)
+            return "", "network_unreachable"
+
+        url = str(out.get("url") or "")
+        if bool(out.get("ok")) and url:
+            return url, ""
+        return "", str(out.get("reason", "failed"))
 
     # ── Internal ─────────────────────────────────────────────────────────────
 

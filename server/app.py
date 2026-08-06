@@ -16,7 +16,18 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from . import __version__
-from .db import close_pool, init_pool, ping, rpc_trial_heartbeat, rpc_unpair_license, rpc_validate_license
+from .db import (
+    close_pool,
+    fetch_bound_fingerprint,
+    fetch_license_billing_by_key,
+    init_pool,
+    patch_license_stripe_customer_by_key,
+    ping,
+    rpc_report_client_error,
+    rpc_trial_heartbeat,
+    rpc_unpair_license,
+    rpc_validate_license,
+)
 from .fingerprint import is_valid_fingerprint
 from .keys import LICENSE_KEY_RE
 from .settings import get_settings
@@ -73,6 +84,52 @@ class ValidateRequest(BaseModel):
 
 class UnpairRequest(ValidateRequest):
     """Same payload as validate; verifies this PC is the bound machine before deleting the bind."""
+
+
+class PortalRequest(ValidateRequest):
+    """Same payload as validate; opens the Stripe customer portal for the key's customer."""
+
+
+class ReportErrorRequest(BaseModel):
+    machine_fingerprint: str
+    license_mode: str
+    error_type: str = "Exception"
+    error_message: str
+    bot_version: str = "unknown"
+
+    @field_validator("machine_fingerprint")
+    @classmethod
+    def validate_fingerprint(cls, v: str) -> str:
+        if not is_valid_fingerprint(v):
+            raise ValueError("Invalid machine fingerprint format")
+        return v
+
+    @field_validator("license_mode")
+    @classmethod
+    def validate_license_mode(cls, v: str) -> str:
+        mode = v.strip().lower()
+        if mode not in ("licensed", "trial"):
+            raise ValueError("license_mode must be licensed or trial")
+        return mode
+
+    @field_validator("error_type")
+    @classmethod
+    def validate_error_type(cls, v: str) -> str:
+        text = v.strip() or "Exception"
+        return text[:200]
+
+    @field_validator("error_message")
+    @classmethod
+    def validate_error_message(cls, v: str) -> str:
+        text = v.strip()
+        if not text:
+            raise ValueError("error_message must not be empty")
+        return text[:2000]
+
+    @field_validator("bot_version")
+    @classmethod
+    def validate_bot_version(cls, v: str) -> str:
+        return (v.strip() or "unknown")[:64]
 
 
 class TrialHeartbeatRequest(BaseModel):
@@ -227,6 +284,104 @@ async def checkout_lifetime(request: Request) -> RedirectResponse:
     return RedirectResponse(url=url, status_code=302)
 
 
+def _find_stripe_customer_by_email(email: str) -> str | None:
+    """Legacy/comp keys may have no stripe_customer_id — fall back to an email match."""
+    result = stripe.Customer.list(email=email, limit=1)
+    data = getattr(result, "data", None) or []
+    for cust in data:
+        cid = cust.get("id") if isinstance(cust, dict) else getattr(cust, "id", None)
+        deleted = cust.get("deleted") if isinstance(cust, dict) else getattr(cust, "deleted", None)
+        if cid and not deleted:
+            return str(cid)
+    return None
+
+
+@app.post("/v1/portal")
+@limiter.limit("10/minute")
+async def billing_portal(request: Request, body: PortalRequest) -> dict:
+    """Create a Stripe Billing (customer) portal session for the license holder.
+
+    Auth is the license key plus the bound machine fingerprint — the same secret the
+    desktop app already holds. Expired keys are allowed through on purpose: renewing
+    is exactly why someone opens the portal.
+    """
+    settings = get_settings()
+    license_key = body.license_key.upper().strip()
+
+    try:
+        row = await fetch_license_billing_by_key(license_key)
+    except Exception as exc:
+        logger.exception("portal license lookup failed: %s", exc)
+        raise HTTPException(status_code=502, detail="license_backend_error")
+
+    if not row:
+        return {"ok": False, "reason": "not_found"}
+    if row.get("status") == "revoked":
+        return {"ok": False, "reason": "revoked"}
+
+    try:
+        bound = await fetch_bound_fingerprint(str(row["id"]))
+    except Exception as exc:
+        logger.exception("portal machine lookup failed: %s", exc)
+        raise HTTPException(status_code=502, detail="license_backend_error")
+
+    if bound and bound != body.machine_fingerprint:
+        return {"ok": False, "reason": "machine_mismatch"}
+
+    customer_id = str(row.get("stripe_customer_id") or "").strip()
+    email = str(row.get("email") or "").strip()
+
+    if not customer_id and email:
+        try:
+            customer_id = await asyncio.to_thread(_find_stripe_customer_by_email, email) or ""
+        except stripe.StripeError as exc:
+            logger.exception("Stripe Customer.list failed for portal: %s", exc)
+            raise HTTPException(status_code=502, detail="stripe_error")
+        if customer_id:
+            try:
+                await patch_license_stripe_customer_by_key(
+                    license_key=license_key, stripe_customer_id=customer_id
+                )
+            except Exception as exc:
+                logger.warning("Could not backfill stripe_customer_id for portal: %s", exc)
+
+    if not customer_id:
+        logger.info("portal request for %s has no Stripe customer", license_key[:12])
+        return {"ok": False, "reason": "no_billing_account"}
+
+    def create_session():
+        kwargs: dict[str, Any] = {
+            "customer": customer_id,
+            "return_url": settings.stripe_portal_return_url,
+        }
+        configuration = (settings.stripe_portal_configuration_id or "").strip()
+        if configuration:
+            kwargs["configuration"] = configuration
+        return stripe.billing_portal.Session.create(**kwargs)
+
+    try:
+        session = await asyncio.to_thread(create_session)
+    except stripe.InvalidRequestError as exc:
+        message = str(getattr(exc, "user_message", "") or exc)
+        if "configuration" in message.lower():
+            logger.error("Stripe customer portal is not configured: %s", message)
+            return {"ok": False, "reason": "portal_not_configured"}
+        logger.exception("billing_portal.Session.create failed: %s", exc)
+        raise HTTPException(status_code=502, detail="stripe_error")
+    except stripe.StripeError as exc:
+        logger.exception("billing_portal.Session.create failed: %s", exc)
+        raise HTTPException(status_code=502, detail="stripe_error")
+
+    url = getattr(session, "url", None) or (
+        session.get("url") if isinstance(session, dict) else None
+    )
+    if not url:
+        logger.error("Portal session missing url for customer %s", customer_id)
+        raise HTTPException(status_code=502, detail="missing_portal_url")
+
+    return {"ok": True, "url": url}
+
+
 @app.post("/v1/validate")
 @limiter.limit("30/minute")
 async def validate(request: Request, body: ValidateRequest) -> dict:
@@ -290,6 +445,34 @@ async def unpair(request: Request, body: UnpairRequest) -> dict:
     if result.get("reason"):
         out["reason"] = result["reason"]
     return out
+
+
+@app.post("/v1/report-error")
+@limiter.limit("30/minute")
+async def report_error(request: Request, body: ReportErrorRequest) -> dict:
+    client_ip = get_remote_address(request)
+
+    try:
+        result = await rpc_report_client_error(
+            machine_fingerprint=body.machine_fingerprint,
+            license_mode=body.license_mode,
+            error_type=body.error_type,
+            error_message=body.error_message,
+            bot_version=body.bot_version,
+            client_ip=client_ip,
+        )
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "report_client_error RPC HTTP error: %s %s",
+            exc.response.status_code,
+            exc.response.text,
+        )
+        raise HTTPException(status_code=502, detail="error_report_backend_error")
+    except Exception as exc:
+        logger.exception("report_client_error RPC failed: %s", exc)
+        raise HTTPException(status_code=502, detail="error_report_backend_error")
+
+    return result
 
 
 @app.post("/v1/trial/heartbeat")

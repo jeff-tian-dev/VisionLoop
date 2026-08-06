@@ -96,6 +96,32 @@ async def rpc_trial_heartbeat(
     return data
 
 
+async def rpc_report_client_error(
+    *,
+    machine_fingerprint: str,
+    license_mode: str,
+    error_type: str,
+    error_message: str,
+    bot_version: str,
+    client_ip: str,
+) -> dict[str, Any]:
+    """Call Postgres RPC `report_client_error` exposed via PostgREST."""
+    payload = {
+        "p_machine_fingerprint": machine_fingerprint,
+        "p_ip": client_ip,
+        "p_license_mode": license_mode,
+        "p_error_type": error_type,
+        "p_error_message": error_message,
+        "p_bot_version": bot_version,
+    }
+    r = await _client_required().post("/rpc/report_client_error", json=payload)
+    r.raise_for_status()
+    data = r.json()
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Unexpected RPC payload: {data!r}")
+    return data
+
+
 async def rpc_unpair_license(
     *,
     license_key: str,
@@ -197,6 +223,58 @@ async def fetch_license_by_key(license_key: str) -> dict[str, Any] | None:
     if not isinstance(rows, list) or not rows:
         return None
     return rows[0]
+
+
+async def fetch_license_billing_by_key(license_key: str) -> dict[str, Any] | None:
+    """Row used by the billing-portal endpoint: id, status, email, stripe_customer_id."""
+    r = await _client_required().get(
+        "/licenses",
+        params={
+            "license_key": f"eq.{license_key}",
+            "select": "id,license_key,status,email,stripe_customer_id",
+            "limit": "1",
+        },
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if not isinstance(rows, list) or not rows:
+        return None
+    return rows[0]
+
+
+async def fetch_bound_fingerprint(license_id: str) -> str | None:
+    """Machine fingerprint bound to a license, or None when unbound/blank."""
+    r = await _client_required().get(
+        "/license_machines",
+        params={
+            "license_id": f"eq.{license_id}",
+            "select": "machine_fingerprint",
+            "limit": "1",
+        },
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if not isinstance(rows, list) or not rows:
+        return None
+    fp = str(rows[0].get("machine_fingerprint") or "").strip()
+    return fp or None
+
+
+async def patch_license_stripe_customer_by_key(
+    *, license_key: str, stripe_customer_id: str
+) -> int:
+    """Backfill stripe_customer_id on a license row. Returns row count."""
+    r = await _client_required().patch(
+        "/licenses",
+        params={"license_key": f"eq.{license_key}"},
+        json={"stripe_customer_id": stripe_customer_id},
+        headers={"Prefer": "return=representation"},
+    )
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, list):
+        return len(data)
+    return 1 if data else 0
 
 
 async def patch_license_expires_at_by_key(

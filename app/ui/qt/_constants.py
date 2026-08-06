@@ -8,15 +8,31 @@ ATTACK_STRATEGIES: dict[str, int] = {
 }
 
 BUILDER_BASE_ATTACK_STRATEGIES: dict[str, int] = {
-    "Baby Dragon": 5,
+    "Baby Dragons": 5,
+    "Night Witches": 6,
 }
 
-BUILDER_BASE_ATTACK_STRATEGIES_UNDER_DEV = ("Night Witches",)
+BUILDER_BASE_ATTACK_STRATEGIES_UNDER_DEV: tuple[str, ...] = ()
 
 BUILDER_BASE_PRIORITISE_LABELS = ("Gold", "Both", "Elixir")
 
 STRIPE_LIFETIME_URL = "https://clashautoloot.duckdns.org/v1/checkout/lifetime"
 SUBSCRIBE_CHECKOUT_URL = "https://clashautoloot.duckdns.org/v1/checkout/subscribe"
+
+PORTAL_USER_ERRORS: dict[str, str] = {
+    "empty": "Enter your license key in the field above first.",
+    "invalid_format": "That license key is not formatted correctly.",
+    "not_found": "That license key was not found.",
+    "revoked": "This license key has been revoked.",
+    "machine_mismatch": "This license key is paired to another PC, so billing cannot be opened here.",
+    "no_billing_account": (
+        "No Stripe billing account is linked to this key — it was likely issued manually. "
+        "Contact support and we'll sort out your billing."
+    ),
+    "portal_not_configured": "Billing management is not available yet. Contact support.",
+    "network_unreachable": "Could not reach the license server. Check your internet and try again.",
+    "failed": "The server declined the request. Try again or contact support.",
+}
 
 UNPAIR_USER_ERRORS: dict[str, str] = {
     "empty": "No license key was entered.",

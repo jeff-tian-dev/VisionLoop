@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.core.bot import Bot
+from app.core.run_plan import RunPlan
 from app.services.license import LicenseManager, LicenseState, clear_saved_key, load_saved_key
 from app.services.trial import (
     TRIAL_HEARTBEAT_INTERVAL_MS,
@@ -17,7 +18,6 @@ from app.services.trial import (
     send_trial_heartbeat,
 )
 from app.utils.logger import setup_logger
-from app.utils.player_list_store import PlayerEntry
 from app.utils.profile_settings_store import load_profile_settings
 
 logger = setup_logger("BotController")
@@ -86,9 +86,24 @@ class BotController(QObject):
             def ui_done() -> None:
                 on_done(ok, reason)
 
-            QTimer.singleShot(0, ui_done)
+            # `self` as context marshals the call onto the GUI thread; without it the
+            # timer is created on this worker thread, which has no event loop to fire it.
+            QTimer.singleShot(0, self, ui_done)
 
         threading.Thread(target=worker, daemon=True, name="UnpairWorker").start()
+
+    def request_portal_url_async(self, key: str, on_done: Callable[[str, str], None]) -> None:
+        """Fetch a Stripe customer-portal link off the GUI thread; on_done(url, reason)."""
+
+        def worker() -> None:
+            url, reason = self._lic.try_portal_url(key)
+
+            def ui_done() -> None:
+                on_done(url, reason)
+
+            QTimer.singleShot(0, self, ui_done)
+
+        threading.Thread(target=worker, daemon=True, name="PortalWorker").start()
 
     def request_trial_probe(self) -> None:
         if self._lic.state == LicenseState.VALID:
@@ -121,18 +136,7 @@ class BotController(QObject):
         self._trial_remaining_seconds = result.remaining_seconds
         self.trialUpdated.emit(result)
 
-    def start(
-        self,
-        *,
-        method: int,
-        minutes: int,
-        star_bonus: bool,
-        ranked_fill: bool,
-        upgrade_walls: bool,
-        multi_run_players: Optional[List[PlayerEntry]],
-        builder_base: bool = False,
-        loot_prioritise: str = "both",
-    ) -> None:
+    def start(self, plan: RunPlan) -> None:
         if self.is_running():
             return
 
@@ -144,16 +148,9 @@ class BotController(QObject):
 
             try:
                 self._bot.start(
-                    method,
-                    minutes,
-                    star_bonus=star_bonus,
+                    plan,
                     status_callback=on_status,
-                    multi_run_players=multi_run_players,
-                    ranked_fill=ranked_fill,
-                    upgrade_walls=upgrade_walls,
                     earthquake_method=load_profile_settings().earthquake_method,
-                    builder_base=builder_base,
-                    loot_prioritise=loot_prioritise,
                 )
             except Exception as exc:
                 error_msg = str(exc)

@@ -108,6 +108,7 @@ BOTTOM_HALF_BOT_TEMPLATES = frozenset(
         "removewallfake.png",
         "upgrademore.png",
         "babydragon.png",
+        "nightwitch.png",
         "findnow.png",
         "bstar.png",
         "bbstar.png",
@@ -226,7 +227,9 @@ class VisionService:
         screen_img: np.ndarray, 
         template_name: str, 
         threshold: float = 0.8,
-        region: Optional[Tuple[int, int, int, int]] = None
+        region: Optional[Tuple[int, int, int, int]] = None,
+        *,
+        scale_template: bool = True,
     ) -> Tuple[Optional[int], Optional[int]]:
         """
         Finds a single occurrence of a template in the screen image.
@@ -238,7 +241,8 @@ class VisionService:
             if template is None:
                 logger.error(f"Template not found: {template_path}")
                 return None, None
-            template = VisionService._resize_template_for_screen(template, screen_img)
+            if scale_template:
+                template = VisionService._resize_template_for_screen(template, screen_img)
 
             if region:
                 x, y, w, h = region

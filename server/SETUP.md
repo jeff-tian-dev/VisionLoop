@@ -49,6 +49,9 @@ STRIPE_SUBSCRIPTION_PRICE_ID=<price_one_time_extend_...>
 # Optional clearer override (if set, used instead of STRIPE_SUBSCRIPTION_PRICE_ID for extend):
 STRIPE_MONTH_EXTEND_PRICE_ID=
 STRIPE_WEBHOOK_SECRET=
+# Optional: customer-portal overrides (blank = account default config / default return URL)
+STRIPE_PORTAL_CONFIGURATION_ID=
+STRIPE_PORTAL_RETURN_URL=https://clashautoloot.duckdns.org/?portal=done
 RESEND_API_KEY=<re_...>
 RESEND_DOMAIN=clashautoloot.com
 EMAIL_FROM=Clash Auto Loot <licenses@clashautoloot.com>
@@ -106,6 +109,25 @@ For month-bundle checkout in test mode without the public redirect URL, print a 
 The app opens **`GET https://clashautoloot.duckdns.org/v1/checkout/month-extend`**, which creates a server-side Stripe Checkout Session (`STRIPE_SECRET_KEY` stays on the VM): adjustable quantity for months plus an optional “existing license key” field. Static **Payment Links** cannot supply that UX—do not swap in a naked buy link unless you drop extend support for that funnel.
 
 Customers can bookmark the same DuckDNS URL; rate limits apply.
+
+### Desktop app: Manage subscription (Stripe customer portal)
+
+The **Manage subscription** button on the app's License page calls **`POST /v1/portal`** with the license key + machine fingerprint (same payload as `/v1/validate`) and opens the returned one-time `billing.stripe.com` link in the browser. There the customer can update their card, download invoices, and cancel — cancellations arrive back as `customer.subscription.deleted` and expire the key at period end via the existing webhook handler.
+
+Auth rule: the key must exist, not be revoked, and either be unbound or bound to the requesting machine. **Expired keys are allowed through on purpose** — renewing is the main reason to open the portal.
+
+Setup, once per Stripe mode (test and live are separate):
+
+1. Dashboard → **Settings → Billing → Customer portal** → configure and **Save/Activate** the default configuration. Until this is done the endpoint returns `{"ok": false, "reason": "portal_not_configured"}` and the app shows "Billing management is not available yet."
+2. Optional: pin a specific configuration with `STRIPE_PORTAL_CONFIGURATION_ID=bpc_...`, and/or change where "Return to merchant" goes with `STRIPE_PORTAL_RETURN_URL`.
+3. Verify from the VM (prints a portal URL for a key or email):
+
+   ```bash
+   sudo bash -lc 'set -a; source /etc/license-api.env; set +a; \
+     cd /opt/license-api && /opt/license-api/.venv/bin/python -m server.scripts.smoke_portal_session --email customer@example.com'
+   ```
+
+Keys with no `stripe_customer_id` (admin/comp keys) fall back to a Stripe customer lookup by the license's email, and the id is backfilled onto the row when found. If there is still no customer, the endpoint returns `no_billing_account` and the app tells the customer to contact support.
 
 ## Daily Operations
 

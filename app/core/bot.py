@@ -1,9 +1,12 @@
 import time
 import random
 import threading
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from app.config import ASPECT_16_10, ASPECT_16_9, Config
+from app.core.run_plan import BUILDER as RP_BUILDER
+from app.core.run_plan import HOME as RP_HOME
+from app.core.run_plan import RunPlan
 from app.core.strategies import AttackStrategy, EdragStrategy, TroopSpamStrategy, _EDRAG_DELAY
 from app.services.input import InputService
 from app.services.vision import (
@@ -13,7 +16,6 @@ from app.services.vision import (
 )
 from app.services.window import WindowService
 from app.utils.logger import setup_logger
-from app.utils.player_list_store import PlayerEntry
 from app.utils.profile_settings_store import EARTHQUAKE_METHOD_CURVE
 
 logger = setup_logger("BotCore")
@@ -27,9 +29,18 @@ _WALL_OCR_RETRY_DRAG_BASELINE: dict[str, tuple[tuple[int, int], tuple[int, int]]
     ASPECT_16_9: ((1300, 280), (1300, 830)),
 }
 
-# Builder Base Baby Dragon deploy uses detected troop-bar count; same diamond edges as Edrags.
+# Builder Base troop deploy (troop-bar count → diamond front arc).
+_BB_METHOD_BABY_DRAGONS = 5
+_BB_METHOD_NIGHT_WITCHES = 6
+_BB_BABY_DRAGON_TEMPLATE = "babydragon.png"
+_BB_NIGHT_WITCH_TEMPLATE = "nightwitch.png"
 _BB_BABY_DRAGON_RECLICK_WAIT = 10.0
+_BB_NIGHT_WITCH_RECLICK_WAIT = 3.0
+_BB_MACHINE_ABILITY_WAIT = 3.0
 _BB_RETURN_HOME_TEMPLATE = "breturnhome.png"
+_BB_RETURN_HOME_TEMPLATE_1080P = "breturnhome1920.png"
+_BB_1080P_CAPTURE_SIZE = (1920, 1080)
+_BB_1080P_SIZE_TOLERANCE = 40
 # Tighter non-overlap suppression for closely spaced BB troop-bar icons (default is 0.5).
 _BB_TEMPLATE_SUPPRESS_PAD = 0.1
 _BB_FULL_ELIXIR_CART_TEMPLATES = ("fullecart.png", "fullecart2.png", "fullecart3.png")
@@ -61,22 +72,17 @@ class Bot:
         self._loot_session_start_mono: float = 0.0
         self._loot_callback: Optional[Callable[[int, int, int, float], None]] = None
         self._suppress_loot_negative_error_once = False
+        # Set per Builder Base step; read by the battle-end logic (_run_builder_base_loop).
+        self._loot_prioritise = "both"
 
     def start(
         self,
-        method: int,
-        run_time_minutes: int,
-        star_bonus: bool = False,
+        plan: RunPlan,
         status_callback=None,
         loot_callback: Optional[Callable[[int, int, int, float], None]] = None,
-        multi_run_players: Optional[List[PlayerEntry]] = None,
-        ranked_fill: bool = False,
-        upgrade_walls: bool = False,
         earthquake_method: str = EARTHQUAKE_METHOD_CURVE,
-        builder_base: bool = False,
-        loot_prioritise: str = "both",
     ):
-        """Starts the bot loop. With ``multi_run_players``, runs a full session per enabled player."""
+        """Runs ``plan`` once per account (or once for the current account if not rotating)."""
         self._status_callback = status_callback
         self._loot_callback = loot_callback
         self._earthquake_method = earthquake_method
@@ -84,45 +90,33 @@ class Bot:
         if not self.window.find_window():
             raise RuntimeError("Clash of Clans window not found. Please ensure the game is open.")
 
+        if plan.is_empty:
+            raise RuntimeError("Run plan is empty — include a village or resource collection.")
+
         self._reset_loot_session()
         self._emit_loot_update()
 
         self.running = True
         self.stop_event.clear()
 
-        duration = 900 if star_bonus else run_time_minutes * 60  # 15 min hard cap for star bonus
-        mr = multi_run_players is not None
-        self._builder_base = builder_base
-        self._loot_prioritise = loot_prioritise
         logger.info(
-            f"Bot started. Method: {method}, Time: {run_time_minutes}m, "
-            f"StarBonus: {star_bonus}, MultiRun: {mr}, RankedFill: {ranked_fill}, "
-            f"UpgradeWalls: {upgrade_walls}, Earthquake: {earthquake_method}, "
-            f"BuilderBase: {builder_base}, LootPrioritise: {loot_prioritise}"
+            f"Bot started. Plan: {plan.describe()}, Earthquake: {earthquake_method}"
         )
 
         try:
-            if multi_run_players is not None:
-                self._ensure_correct_village(builder_base=False)
-                queue = [p for p in multi_run_players if p.enabled]
+            if not plan.rotating:
+                self._run_account_session(plan)
+            else:
+                queue = plan.enabled_players
                 if not queue:
                     raise RuntimeError("Multi-run: no players marked Run")
+                self._ensure_correct_village(builder_base=False)
                 for player in queue:
                     self._check_stop()
                     self._switch_account_and_load_home(player.name)
                     self._check_stop()
-                    self._run_loop(
-                        method, duration, star_bonus, ranked_fill, upgrade_walls
-                    )
+                    self._run_account_session(plan)
                     self._check_stop()
-                    self._multi_run_builder_base_after_session()
-                    self._check_stop()
-            elif self._builder_base:
-                self._ensure_correct_village(builder_base=True)
-                self._run_builder_base_loop(duration, star_bonus=star_bonus)
-            else:
-                self._ensure_correct_village(builder_base=False)
-                self._run_loop(method, duration, star_bonus, ranked_fill, upgrade_walls)
         except InterruptedError:
             pass
         except Exception as e:
@@ -132,6 +126,76 @@ class Bot:
             self.running = False
             self._earthquake_method = EARTHQUAKE_METHOD_CURVE
             logger.info("Bot stopped.")
+
+    def _run_account_session(self, plan: RunPlan) -> None:
+        """
+        One account's turn through the plan:
+
+        Home Village session → collect on home → boat → collect in Builder Base →
+        Builder Base session → boat home.
+
+        Steps the plan excludes are skipped, but the **boat trips are not part of
+        collecting** — they are travel, and they still run whenever Builder Base is
+        visited. Turning collection off must never strand the run in the wrong village.
+        """
+        home_step = plan.step_for(RP_HOME)
+        builder_step = plan.step_for(RP_BUILDER)
+        # Collecting also needs the trip: the builder resources are over there.
+        visit_builder = builder_step is not None or plan.collect_resources
+        # Nothing on home to do, so don't route through it — _ensure_correct_village
+        # takes the boat only if we are not in Builder Base already.
+        builder_only = home_step is None and not plan.collect_resources
+
+        if builder_only:
+            self._ensure_correct_village(builder_base=True)
+        else:
+            # Home Village is the hub — the boat to Builder Base leaves from there.
+            self._ensure_correct_village(builder_base=False)
+
+            if home_step is not None:
+                self._loot_prioritise = home_step.loot_prioritise
+                self._run_loop(
+                    home_step.method,
+                    home_step.duration_seconds,
+                    home_step.star_bonus,
+                    home_step.ranked_fill,
+                    home_step.upgrade_walls,
+                )
+                self._check_stop()
+
+            if plan.collect_resources:
+                self._collect_home_village_resources()
+                self._check_stop()
+
+            if not visit_builder:
+                return
+
+            if not self._go_to_builder_base_with_boat():
+                msg = "Builder Base: boat not found — skipping the Builder Base leg"
+                logger.warning(msg)
+                cb = getattr(self, "_status_callback", None)
+                if cb:
+                    cb(msg)
+                return
+
+        try:
+            if plan.collect_resources:
+                self._collect_builder_base_resources()
+                self._check_stop()
+            if builder_step is not None:
+                self._loot_prioritise = builder_step.loot_prioritise
+                self._run_builder_base_loop(
+                    builder_step.duration_seconds,
+                    star_bonus=builder_step.star_bonus,
+                    method=builder_step.method,
+                )
+        finally:
+            # Sail back even if the Builder Base leg failed: the next account switch
+            # has to start from Home Village. On a user stop this re-raises
+            # immediately without clicking. A single-account Builder-Base-only run
+            # has no next account, so it stays put — as it did before this change.
+            if not (builder_only and not plan.rotating):
+                self._leave_builder_base_with_nboat(settle_before_drag=True)
 
     def stop(self):
         """Signals the bot to stop."""
@@ -527,9 +591,31 @@ class Bot:
                 break
 
     def _run_builder_base_loop(
-        self, duration_seconds: int, star_bonus: bool = False
+        self, duration_seconds: int, star_bonus: bool = False, method: int = _BB_METHOD_BABY_DRAGONS
     ) -> None:
-        """Builder Base farming: Attack → Find Now → Baby Dragon deploy → end battle or surrender → Return Home."""
+        """Builder Base farming, then one last elixir-cart sweep before the session ends.
+
+        The in-loop sweep only runs after a completed attack, so a session that ends on
+        a retry path (no Attack button, Find Now missing, deploy failed) — or on the
+        star-bonus early exit — would otherwise leave a full cart sitting there.
+        """
+        self._bb_attack_loop(duration_seconds, star_bonus=star_bonus, method=method)
+
+        if self.stop_event.is_set():
+            return  # user pressed Stop; don't start another click sequence
+
+        logger.info("Builder Base: session finished — final elixir cart check")
+        self._bb_collect_elixir_cart_after_attack()
+
+    def _bb_attack_loop(
+        self, duration_seconds: int, star_bonus: bool = False, method: int = _BB_METHOD_BABY_DRAGONS
+    ) -> None:
+        """Attack → Find Now → troop deploy → end battle or surrender → Return Home, until time is up."""
+        troop_template = (
+            _BB_NIGHT_WITCH_TEMPLATE
+            if method == _BB_METHOD_NIGHT_WITCHES
+            else _BB_BABY_DRAGON_TEMPLATE
+        )
         start_time = time.time()
         cb = getattr(self, "_status_callback", None)
 
@@ -576,16 +662,16 @@ class Bot:
                 continue
             self.input.click(fx, fy, pause=0.15)
 
-            # Wait for base load via Baby Dragon card (bottom half)
-            bx, by = self._wait_for_image("babydragon.png", timeout=30, error=False)
+            # Wait for base load via troop card (bottom half)
+            bx, by = self._wait_for_image(troop_template, timeout=30, error=False)
             if not bx:
-                msg = "Builder Base: babydragon.png not found after Find Now"
+                msg = f"Builder Base: {troop_template} not found after Find Now"
                 logger.warning(msg)
                 if cb:
                     cb(msg)
                 continue
 
-            # Zoom out a bit from center, then select Baby Dragon and deploy on diamond edges
+            # Zoom out a bit from center, then select troop and deploy on diamond edges
             frame = self.window.screenshot()
             if frame is None:
                 continue
@@ -603,8 +689,15 @@ class Bot:
             if frame is None:
                 continue
             self._update_config_size(frame)
-            if not self._deploy_bb_baby_dragons(frame):
-                logger.warning("Builder Base: babydragon.png lost after zoom nudge / deploy failed")
+            if method == _BB_METHOD_NIGHT_WITCHES:
+                deployed = self._deploy_bb_night_witches(frame)
+            else:
+                deployed = self._deploy_bb_baby_dragons(frame)
+            if not deployed:
+                logger.warning(
+                    "Builder Base: %s lost after zoom nudge / deploy failed",
+                    troop_template,
+                )
                 continue
 
             if self._loot_prioritise == "elixir":
@@ -709,7 +802,7 @@ class Bot:
         roi = VisionService.bottom_half_region(frame)
         centers = VisionService.find_all_template_centers(
             frame,
-            "babydragon.png",
+            _BB_BABY_DRAGON_TEMPLATE,
             region=roi,
             max_matches=12,
             suppress_pad_frac=_BB_TEMPLATE_SUPPRESS_PAD,
@@ -722,8 +815,17 @@ class Bot:
         if self.stop_event.wait(0.2):
             return True
 
+        deploy_reverse = random.choice((False, True))
+        logger.debug(
+            "Builder Base: deploying %d baby dragons %s",
+            deploy_count,
+            "right→top→left" if deploy_reverse else "left→top→right",
+        )
         for px, py in strategy._even_diamond_top_perimeter_points(
-            frame, deploy_count, reserve_top_corner_slot=True
+            frame,
+            deploy_count,
+            reserve_top_corner_slot=True,
+            reverse=deploy_reverse,
         ):
             self._check_stop()
             self.input.click(px, py, pause=_EDRAG_DELAY, rand=False)
@@ -739,21 +841,59 @@ class Bot:
                 self.input.click(x, y, pause=0.15, rand=False)
         return True
 
+    def _deploy_bb_night_witches(self, frame) -> bool:
+        """Find all Night Witch icons, deploy randomly on diamond front arc, wait, re-click."""
+        strategy = AttackStrategy(
+            self.input, self.vision, self.config, self.stop_event
+        )
+        roi = VisionService.bottom_half_region(frame)
+        centers = VisionService.find_all_template_centers(
+            frame,
+            _BB_NIGHT_WITCH_TEMPLATE,
+            region=roi,
+            max_matches=12,
+            suppress_pad_frac=_BB_TEMPLATE_SUPPRESS_PAD,
+        )
+        if not centers:
+            return False
+
+        deploy_count = len(centers)
+        self.input.click(centers[0][0], centers[0][1], pause=0.3, rand=False)
+        if self.stop_event.wait(0.2):
+            return True
+
+        logger.debug(
+            "Builder Base: deploying %d night witches along left→top→right (random)",
+            deploy_count,
+        )
+        for px, py in strategy._random_diamond_top_perimeter_points(frame, deploy_count):
+            self._check_stop()
+            self.input.click(px, py, pause=_EDRAG_DELAY, rand=False)
+
+        self._deploy_bb_battle_or_flying_machine(strategy)
+
+        if self._loot_prioritise != "elixir":
+            if self.stop_event.wait(_BB_NIGHT_WITCH_RECLICK_WAIT):
+                return True
+
+            for x, y in centers:
+                self._check_stop()
+                self.input.click(x, y, pause=0.15, rand=False)
+        return True
+
     def _deploy_bb_battle_or_flying_machine(self, strategy: AttackStrategy) -> None:
-        """One bar lookup: Battle Machine, else Flying Machine; deploy on a random diamond edge."""
+        """Deploy Battle Machine or Flying Machine, then re-tap its icon to activate ability."""
         frame = self.window.screenshot()
         if frame is None:
             return
         self._update_config_size(frame)
         roi = VisionService.bottom_half_region(frame)
 
-        tx, ty = self.vision.find_template(
-            frame, _BB_BATTLE_MACHINE_TEMPLATE, region=roi
-        )
+        template_name = _BB_BATTLE_MACHINE_TEMPLATE
+        tx, ty = self.vision.find_template(frame, template_name, region=roi)
         if not tx:
-            tx, ty = self.vision.find_template(
-                frame, _BB_FLYING_MACHINE_TEMPLATE, region=roi
-            )
+            template_name = _BB_FLYING_MACHINE_TEMPLATE
+            tx, ty = self.vision.find_template(frame, template_name, region=roi)
         if not tx:
             logger.debug(
                 "Builder Base: %s / %s not found on troop bar",
@@ -762,11 +902,20 @@ class Bot:
             )
             return
 
+        icon_x, icon_y = tx, ty
         px, py = strategy._random_diamond_perimeter_point(frame)
-        self.input.click(tx, ty, pause=0.3, rand=False)
+        self.input.click(icon_x, icon_y, pause=0.3, rand=False)
         if self.stop_event.wait(0.2):
             return
         self.input.click(px, py, pause=_EDRAG_DELAY, rand=False)
+
+        if self.stop_event.wait(_BB_MACHINE_ABILITY_WAIT):
+            return
+        logger.debug(
+            "Builder Base: activating %s ability (re-tap troop icon)",
+            template_name,
+        )
+        self.input.click(icon_x, icon_y, pause=0.15, rand=False)
 
     def _bb_end_battle_and_return_home(self) -> None:
         """Wait for natural battle end, dismiss Okay, then tap BB Return Home."""
@@ -827,6 +976,46 @@ class Bot:
 
         self._bb_dismiss_okay_and_return_home()
 
+    def _bb_return_home_template_for_screen(
+        self, width: int, height: int
+    ) -> Tuple[str, bool]:
+        """Return (template name, scale_template) for Builder Base Return Home."""
+        tw, th = _BB_1080P_CAPTURE_SIZE
+        tol = _BB_1080P_SIZE_TOLERANCE
+        if abs(width - tw) <= tol and abs(height - th) <= tol:
+            return _BB_RETURN_HOME_TEMPLATE_1080P, False
+        return _BB_RETURN_HOME_TEMPLATE, True
+
+    def _wait_for_bb_return_home(
+        self, timeout: int = 15
+    ) -> Tuple[Optional[int], Optional[int], str]:
+        """Wait for BB Return Home; picks 1080p-native template when capture is ~1920x1080."""
+        start = time.time()
+        template_name = _BB_RETURN_HOME_TEMPLATE
+        while time.time() - start < timeout:
+            self._check_stop()
+            frame = self.window.screenshot()
+            if frame is None:
+                continue
+            self._update_config_size(frame)
+            h, w = frame.shape[:2]
+            template_name, scale_template = self._bb_return_home_template_for_screen(w, h)
+            search_region = self._search_region_for_template(
+                frame, template_name, None, None, 200
+            )
+            x, y = self.vision.find_template(
+                frame,
+                template_name,
+                threshold=0.8,
+                region=search_region,
+                scale_template=scale_template,
+            )
+            if x:
+                return x, y, template_name
+            if self.stop_event.wait(0.5):
+                return None, None, template_name
+        return None, None, template_name
+
     def _bb_dismiss_okay_and_return_home(
         self,
         *,
@@ -834,6 +1023,7 @@ class Bot:
         max_retries: int = _BB_RETURN_HOME_END_BATTLE_RETRIES,
     ) -> None:
         """Dismiss Okay, tap Return Home; retry battle-end + Okay if Return Home stays hidden."""
+        return_home_template = _BB_RETURN_HOME_TEMPLATE
         for attempt in range(max_retries + 1):
             self._check_stop()
             if attempt > 0:
@@ -857,9 +1047,7 @@ class Bot:
             if ox:
                 self.input.click(ox, oy, pause=0.15)
 
-            rx, ry = self._wait_for_image(
-                _BB_RETURN_HOME_TEMPLATE, timeout=15, error=False
-            )
+            rx, ry, return_home_template = self._wait_for_bb_return_home(timeout=15)
             if rx:
                 self.input.click(rx, ry, pause=0.2)
                 if attempt > 0:
@@ -873,7 +1061,7 @@ class Bot:
             if attempt < max_retries:
                 logger.info(
                     "Builder Base: %s not found — retrying %s + okay (%d/%d)",
-                    _BB_RETURN_HOME_TEMPLATE,
+                    return_home_template,
                     retry_battle_template,
                     attempt + 1,
                     max_retries,
@@ -881,7 +1069,7 @@ class Bot:
 
         logger.warning(
             "Builder Base: %s not found after %d %s retries",
-            _BB_RETURN_HOME_TEMPLATE,
+            return_home_template,
             max_retries,
             retry_battle_template,
         )
@@ -1383,7 +1571,18 @@ class Bot:
         logger.info("Leaving Builder Base (drag + nboat)")
         cb = getattr(self, "_status_callback", None)
         if cb:
-            cb("Multi-run: leaving Builder Base (nboat)")
+            cb("Returning to Home Village")
+
+        # Clear whatever is on top before panning. The Home Village path gets this
+        # for free from _nudge_view_to_reveal_attack, but callers reaching here have
+        # already matched mbuilder.png and skipped that nudge — so a popup covering
+        # the boat would make the nboat lookup fail on every retry (the login loop in
+        # _wake_home_and_wait_for_attack spins its whole timeout that way).
+        self.input.click(*self.config.get_point("empty"), pause=0.15)
+        frame = self.window.screenshot()
+        if frame is not None:
+            self._update_config_size(frame)
+            self._dismiss_okay_or_exit_on_frame(frame)
 
         self._bb_pan_down_left_from_center()
 
@@ -1393,40 +1592,32 @@ class Bot:
         else:
             logger.warning("nboat.png not found after Builder Base drag — may still be in Builder Base")
 
-    def _multi_run_collect_home_village_resources(self) -> None:
-        """Multi-run: tap Home Village collect bubbles if visible, before taking the boat to Builder Base."""
+    def _collect_home_village_resources(self) -> None:
+        """Tap the Home Village collect bubbles if visible. Caller must already be on home."""
         cb = getattr(self, "_status_callback", None)
-        logger.info("Multi-run: Home Village collect (hgold, helixir, hdelixir)")
+        logger.info("Collect: Home Village (hgold, helixir, hdelixir)")
         if cb:
-            cb("Multi-run: Home Village collect")
+            cb("Collecting Home Village resources")
         for tpl in ("hgold.png", "helixir.png", "hdelixir.png"):
             self._check_stop()
             rx, ry = self._find_template_once(tpl, threshold=0.7)
             if rx:
                 self.input.click(rx, ry, pause=0.15)
 
-    def _multi_run_builder_base_after_session(self) -> None:
+    def _collect_builder_base_resources(self) -> None:
         """
-        Multi-run only: after an account's farming session, collect Home Village resources if icons
-        appear, open the secondary base via boat, collect builder resources if icons appear,
-        optionally run the clock boost chain, then leave Builder Base.
-        """
-        self._multi_run_collect_home_village_resources()
+        Tap the Builder Base collect bubbles, then run the clock boost chain.
 
+        Caller must already be in Builder Base — travel is the caller's job, so that
+        turning collection off never removes a boat trip (see :meth:`_run_account_session`).
+
+        The clock boost is counted as collecting: it costs nothing and is claimed on the
+        same visit, so it follows the same toggle as the resource bubbles.
+        """
         cb = getattr(self, "_status_callback", None)
-        msg = "Multi-run: Builder Base (boat → collect)"
-        logger.info(msg)
+        logger.info("Collect: Builder Base (bgold, belixir, bgem, clock boost)")
         if cb:
-            cb(msg)
-
-        bx, by = self._wait_for_image("boat.png", timeout=15, error=False)
-        if not bx:
-            logger.warning("Multi-run: boat.png not found — skipping Builder Base step")
-            return
-
-        self.input.click(bx, by, pause=0.2)
-        if self.stop_event.wait(1.0):
-            self._check_stop()
+            cb("Collecting Builder Base resources")
 
         for tpl in ("bgold.png", "belixir.png", "bgem.png"):
             self._check_stop()
@@ -1450,8 +1641,6 @@ class Bot:
             bux, buy = self._wait_for_image("boost.png", timeout=10, error=False)
             if bux:
                 self.input.click(bux, buy, pause=0.15)
-
-        self._leave_builder_base_with_nboat(settle_before_drag=True)
 
     def _frame_shows_supercell_login_prompt(self, frame) -> bool:
         """True if OCR sees the Supercell ID login line (list scroll won't help)."""

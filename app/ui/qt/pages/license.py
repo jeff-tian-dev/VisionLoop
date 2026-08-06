@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.license import LicenseState, load_saved_key
-from app.ui.qt._constants import STRIPE_LIFETIME_URL, SUBSCRIBE_CHECKOUT_URL
+from app.ui.qt._constants import PORTAL_USER_ERRORS, STRIPE_LIFETIME_URL, SUBSCRIBE_CHECKOUT_URL
 from app.ui.qt.bot_controller import BotController
 from app.ui.qt.dialogs import UnpairConfirmDialog, show_error
 from app.ui.qt.theme import SPACING, TOKENS
@@ -91,6 +91,13 @@ class LicensePage(QWidget):
         self._btn_lifetime = neutral_button("Buy lifetime", parent=self)
         self._btn_lifetime.clicked.connect(self._open_lifetime_checkout)
         footer.addWidget(self._btn_lifetime)
+        self._btn_portal = neutral_button("Manage subscription", parent=self)
+        self._btn_portal.setToolTip(
+            "Open your Stripe billing page to update payment details, "
+            "see invoices, or cancel your subscription."
+        )
+        self._btn_portal.clicked.connect(self._open_billing_portal)
+        footer.addWidget(self._btn_portal)
         self._btn_unpair = neutral_button("Unpair…", parent=self)
         self._btn_unpair.clicked.connect(self._open_unpair)
         footer.addWidget(self._btn_unpair)
@@ -212,6 +219,30 @@ class LicensePage(QWidget):
             )
             return
         webbrowser.open(url)
+
+    def _open_billing_portal(self) -> None:
+        key = self._entry.text().strip()
+        if not key:
+            show_error(
+                self.window(),
+                "Manage subscription",
+                PORTAL_USER_ERRORS["empty"],
+            )
+            return
+
+        self._btn_portal.setEnabled(False)
+        self._btn_portal.setText("Opening…")
+
+        def on_done(url: str, reason: str) -> None:
+            self._btn_portal.setEnabled(True)
+            self._btn_portal.setText("Manage subscription")
+            if url:
+                webbrowser.open(url)
+                return
+            msg = PORTAL_USER_ERRORS.get(reason, reason.replace("_", " ").capitalize())
+            show_error(self.window(), "Manage subscription", msg)
+
+        self._controller.request_portal_url_async(key, on_done)
 
     def _open_unpair(self) -> None:
         key = self._entry.text().strip()

@@ -34,7 +34,7 @@ class _PlayerRow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self._name = QLineEdit(entry.name)
-        self._name.setPlaceholderText("Username (match in-game)")
+        self._name.setPlaceholderText("Supercell ID name")
         self._name.setMinimumWidth(240)
         self._name.editingFinished.connect(on_change)
         layout.addWidget(self._name, stretch=1)

@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     stripe_subscription_price_id: str = ""
     stripe_month_extend_price_id: str = ""
     stripe_webhook_secret: str = ""
+    # Optional: a specific Customer portal configuration; blank = the account default.
+    stripe_portal_configuration_id: str = ""
+    stripe_portal_return_url: str = "https://clashautoloot.duckdns.org/?portal=done"
 
     def month_extend_price_id(self) -> str:
         """One-time Stripe Price for N× month access; falls back to stripe_subscription_price_id."""
